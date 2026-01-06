@@ -1,0 +1,9 @@
+Thank you for downloading from ArtByLiv!
+
+Model comes with 13 colors
+Vertex count 408
+11 Animations + default pose
+Animations are NOT additive
+
+Also included are three demo scripts including a 3rd person character controller.
+Prefabs include third person cat setup with camera - just drag and drop.
