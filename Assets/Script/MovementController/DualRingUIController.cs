@@ -1,31 +1,41 @@
 using UnityEngine;
 
 /// <summary>
-/// World-space dual ring UI + direction arrow.
-/// Rings follow otter position in world.
-/// Arrow:
-/// - starts at otter position
-/// - points in provided world direction (XZ)
-/// - length clamped to outer ring radius
+/// Dual ring UI drawn in WORLD SPACE (LineRenderer),
+/// centered at the CHARACTER (otter) position.
+/// With a following camera, rings appear at screen center.
+///
+/// Radii are defined in PIXELS and converted to WORLD units for ORTHOGRAPHIC cameras,
+/// so the UI stays visually consistent regardless of camera size/resolution.
 /// </summary>
 public class DualRingUIController : MonoBehaviour
 {
-    [Header("Ring Settings (World Units)")]
-    [SerializeField] private float innerRingRadius = 1f;
-    [SerializeField] private float outerRingRadius = 3f;
+    [Header("References")]
+    [SerializeField] private Camera uiCamera;
+
+    [Tooltip("The character/root transform the rings should follow (otter root).")]
+    [SerializeField] private Transform followTarget;
+
+    [Header("Plane (Water Surface)")]
+    [SerializeField] private bool useFixedPlaneY = true;
+    [SerializeField] private float fixedPlaneY = 0f;
+
+    [Header("Ring Radii (Pixels)")]
+    [SerializeField] private float innerRadiusPx = 120f;
+    [SerializeField] private float outerRadiusPx = 260f;
+
+    [Header("Ring Geometry")]
     [SerializeField] private int ringSegments = 64;
 
     [Header("Ring Visual")]
-    [SerializeField] private Color innerRingColor = new Color(1f, 1f, 1f, 0.3f);
-    [SerializeField] private Color outerRingColor = new Color(1f, 1f, 1f, 0.5f);
-    [SerializeField] private float ringWidth = 0.05f;
+    [SerializeField] private Color innerRingColor = new Color(1f, 1f, 1f, 0.30f);
+    [SerializeField] private Color outerRingColor = new Color(1f, 1f, 1f, 0.50f);
+    [SerializeField] private float ringWidthWorld = 0.05f;
 
     [Header("Arrow Visual")]
     [SerializeField] private Color arrowColor = Color.yellow;
-    [SerializeField] private float arrowWidth = 0.08f;
-    [SerializeField] private float arrowYOffset = 0.08f;
-
-    private MovementController movement;
+    [SerializeField] private float arrowWidthWorld = 0.08f;
+    [SerializeField] private float arrowYOffsetWorld = 0.08f;
 
     private GameObject ringContainer;
     private LineRenderer innerRing;
@@ -35,124 +45,81 @@ public class DualRingUIController : MonoBehaviour
     private LineRenderer arrow;
 
     private Vector3 centerWorld;
+    private float innerRadiusWorld;
+    private float outerRadiusWorld;
 
-    void Start()
+    private int lastScreenW, lastScreenH;
+    private float lastOrthoSize;
+    private float lastAspect;
+
+    public float InnerRadiusPx => innerRadiusPx;
+    public float OuterRadiusPx => outerRadiusPx;
+    public Vector2 ScreenCenterPx => new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+
+    private float PlaneY => useFixedPlaneY ? fixedPlaneY : centerWorld.y;
+
+    private void Start()
     {
-        movement = FindObjectOfType<MovementController>();
-        if (movement != null)
+        if (uiCamera == null) uiCamera = Camera.main;
+
+        // Auto-find MovementController as default follow target
+        if (followTarget == null)
         {
-            innerRingRadius = movement.GetInnerRingRadius();
-            outerRingRadius = movement.GetOuterRingRadius();
-            centerWorld = movement.transform.position;
+            var mv = FindObjectOfType<MovementController>();
+            if (mv != null) followTarget = mv.transform;
         }
 
         CreateRings();
         CreateArrow();
+
+        RecomputeWorldRadii(force: true);
+        UpdateCenterFromTarget();
+        ApplyCenter();
+        RebuildRingGeometry();
     }
 
-    void Update()
+    private void Update()
     {
-        if (movement == null)
-            return;
+        if (uiCamera == null) return;
 
-        // Follow otter in world
-        centerWorld = movement.transform.position;
-        if (ringContainer != null)
-            ringContainer.transform.position = centerWorld;
-
-        // Optional: hide arrow when not dragging
-        if (!movement.IsDragging())
-            HideArrow();
-    }
-
-    public void SetCenter(Vector3 worldCenter)
-    {
-        centerWorld = worldCenter;
-        if (ringContainer != null)
-            ringContainer.transform.position = centerWorld;
-    }
-
-    private void CreateRings()
-    {
-        ringContainer = new GameObject("RingContainer");
-        ringContainer.transform.SetParent(transform, worldPositionStays: true);
-        ringContainer.transform.position = centerWorld;
-
-        GameObject innerGO = new GameObject("InnerRing");
-        innerGO.transform.SetParent(ringContainer.transform, worldPositionStays: false);
-        innerRing = innerGO.AddComponent<LineRenderer>();
-        SetupRing(innerRing, innerRingRadius, innerRingColor);
-
-        GameObject outerGO = new GameObject("OuterRing");
-        outerGO.transform.SetParent(ringContainer.transform, worldPositionStays: false);
-        outerRing = outerGO.AddComponent<LineRenderer>();
-        SetupRing(outerRing, outerRingRadius, outerRingColor);
-    }
-
-    private void SetupRing(LineRenderer lr, float radius, Color color)
-    {
-        Shader shader = Shader.Find("Unlit/Color");
-        if (shader == null) shader = Shader.Find("Sprites/Default");
-        lr.material = new Material(shader);
-
-        lr.startColor = color;
-        lr.endColor = color;
-        lr.startWidth = ringWidth;
-        lr.endWidth = ringWidth;
-
-        lr.useWorldSpace = false;
-        lr.loop = true;
-
-        int seg = Mathf.Max(8, ringSegments);
-        lr.positionCount = seg;
-
-        for (int i = 0; i < seg; i++)
+        if (followTarget == null)
         {
-            float angle = 2f * Mathf.PI * i / seg;
-            float x = Mathf.Cos(angle) * radius;
-            float z = Mathf.Sin(angle) * radius;
-            lr.SetPosition(i, new Vector3(x, 0f, z));
+            var mv = FindObjectOfType<MovementController>();
+            if (mv != null) followTarget = mv.transform;
         }
+
+        RecomputeWorldRadii(force: false);
+        UpdateCenterFromTarget();
+        ApplyCenter();
     }
 
-    private void CreateArrow()
-    {
-        arrowObject = new GameObject("DirectionArrow");
-        arrowObject.transform.SetParent(transform, worldPositionStays: true);
+    public Vector3 GetCenterWorldOnPlane() => centerWorld;
 
-        arrow = arrowObject.AddComponent<LineRenderer>();
-        Shader shader = Shader.Find("Unlit/Color");
-        if (shader == null) shader = Shader.Find("Sprites/Default");
-        arrow.material = new Material(shader);
-
-        arrow.startColor = arrowColor;
-        arrow.endColor = arrowColor;
-        arrow.startWidth = arrowWidth;
-        arrow.endWidth = arrowWidth;
-
-        arrow.useWorldSpace = true;
-        arrow.positionCount = 2;
-        arrow.enabled = false;
-    }
-
-    public void UpdateArrow(Vector3 startPosition, Vector3 direction, float distanceWorld)
+    public void UpdateArrowFromScreen(Vector2 dirScreen, float radiusPx)
     {
         if (arrow == null) return;
 
-        Vector3 dir = new Vector3(direction.x, 0f, direction.z);
-        if (dir.sqrMagnitude < 0.0001f)
+        if (dirScreen.sqrMagnitude < 1e-6f)
         {
             arrow.enabled = false;
             return;
         }
-        dir.Normalize();
 
-        float length = Mathf.Clamp(distanceWorld, 0f, outerRingRadius);
+        Vector3 dirWorld = ScreenDirToWorldXZ(dirScreen);
+        if (dirWorld.sqrMagnitude < 1e-6f)
+        {
+            arrow.enabled = false;
+            return;
+        }
 
-        Vector3 p0 = new Vector3(startPosition.x, startPosition.y + arrowYOffset, startPosition.z);
-        Vector3 p1 = p0 + dir * length;
+        float clampedPx = Mathf.Clamp(radiusPx, 0f, outerRadiusPx);
+        float lenWorld = (clampedPx / Mathf.Max(1f, outerRadiusPx)) * outerRadiusWorld;
+
+        Vector3 p0 = centerWorld + Vector3.up * arrowYOffsetWorld;
+        Vector3 p1 = p0 + dirWorld * lenWorld;
 
         arrow.enabled = true;
+        arrow.positionCount = 2;
         arrow.SetPosition(0, p0);
         arrow.SetPosition(1, p1);
     }
@@ -160,5 +127,130 @@ public class DualRingUIController : MonoBehaviour
     public void HideArrow()
     {
         if (arrow != null) arrow.enabled = false;
+    }
+
+    private void CreateRings()
+    {
+        ringContainer = new GameObject("RingContainer_CharacterCentered");
+        ringContainer.transform.SetParent(transform, worldPositionStays: true);
+
+        GameObject innerGO = new GameObject("InnerRing");
+        innerGO.transform.SetParent(ringContainer.transform, worldPositionStays: false);
+        innerRing = innerGO.AddComponent<LineRenderer>();
+        SetupLine(innerRing, innerRingColor, ringWidthWorld);
+        innerRing.loop = true;
+
+        GameObject outerGO = new GameObject("OuterRing");
+        outerGO.transform.SetParent(ringContainer.transform, worldPositionStays: false);
+        outerRing = outerGO.AddComponent<LineRenderer>();
+        SetupLine(outerRing, outerRingColor, ringWidthWorld);
+        outerRing.loop = true;
+    }
+
+    private void CreateArrow()
+    {
+        arrowObject = new GameObject("DirectionArrow_CharacterCentered");
+        arrowObject.transform.SetParent(transform, worldPositionStays: true);
+
+        arrow = arrowObject.AddComponent<LineRenderer>();
+        SetupLine(arrow, arrowColor, arrowWidthWorld);
+        arrow.useWorldSpace = true;
+        arrow.loop = false;
+        arrow.enabled = false;
+    }
+
+    private void SetupLine(LineRenderer lr, Color color, float width)
+    {
+        Shader shader = Shader.Find("Unlit/Color");
+        if (shader == null) shader = Shader.Find("Sprites/Default");
+        lr.material = new Material(shader);
+
+        lr.startColor = color;
+        lr.endColor = color;
+        lr.startWidth = width;
+        lr.endWidth = width;
+
+        lr.useWorldSpace = false;
+        lr.numCapVertices = 4;
+        lr.numCornerVertices = 2;
+    }
+
+    private void UpdateCenterFromTarget()
+    {
+        if (followTarget == null) return;
+
+        centerWorld = followTarget.position;
+        if (useFixedPlaneY) centerWorld.y = fixedPlaneY;
+    }
+
+    private void ApplyCenter()
+    {
+        if (ringContainer != null)
+            ringContainer.transform.position = centerWorld;
+    }
+
+    private void RecomputeWorldRadii(bool force)
+    {
+        if (uiCamera == null) return;
+
+        bool changed =
+            force ||
+            Screen.width != lastScreenW ||
+            Screen.height != lastScreenH ||
+            !Mathf.Approximately(uiCamera.aspect, lastAspect) ||
+            (uiCamera.orthographic && !Mathf.Approximately(uiCamera.orthographicSize, lastOrthoSize));
+
+        if (!changed) return;
+
+        lastScreenW = Screen.width;
+        lastScreenH = Screen.height;
+        lastAspect = uiCamera.aspect;
+        lastOrthoSize = uiCamera.orthographic ? uiCamera.orthographicSize : lastOrthoSize;
+
+        if (!uiCamera.orthographic)
+        {
+            innerRadiusWorld = innerRadiusPx * 0.01f;
+            outerRadiusWorld = outerRadiusPx * 0.01f;
+        }
+        else
+        {
+            float unitsPerPixel = (2f * uiCamera.orthographicSize) / Mathf.Max(1, Screen.height);
+            innerRadiusWorld = innerRadiusPx * unitsPerPixel;
+            outerRadiusWorld = outerRadiusPx * unitsPerPixel;
+        }
+
+        RebuildRingGeometry();
+    }
+
+    private void RebuildRingGeometry()
+    {
+        int seg = Mathf.Max(12, ringSegments);
+
+        innerRing.positionCount = seg;
+        outerRing.positionCount = seg;
+
+        for (int i = 0; i < seg; i++)
+        {
+            float a = 2f * Mathf.PI * i / seg;
+            innerRing.SetPosition(i, new Vector3(Mathf.Cos(a) * innerRadiusWorld, 0f, Mathf.Sin(a) * innerRadiusWorld));
+            outerRing.SetPosition(i, new Vector3(Mathf.Cos(a) * outerRadiusWorld, 0f, Mathf.Sin(a) * outerRadiusWorld));
+        }
+    }
+
+    private Vector3 ScreenDirToWorldXZ(Vector2 dirScreen)
+    {
+        // For top-down cameras: use camera.up as screen-Y axis (not forward).
+        Vector3 camRight = uiCamera.transform.right; camRight.y = 0f;
+        Vector3 camUp = uiCamera.transform.up; camUp.y = 0f;
+
+        if (camRight.sqrMagnitude < 1e-6f) camRight = Vector3.right;
+        if (camUp.sqrMagnitude < 1e-6f) camUp = Vector3.forward;
+
+        camRight.Normalize();
+        camUp.Normalize();
+
+        Vector3 w = camRight * dirScreen.x + camUp * dirScreen.y;
+        w.y = 0f;
+        return w.sqrMagnitude > 1e-6f ? w.normalized : Vector3.forward;
     }
 }

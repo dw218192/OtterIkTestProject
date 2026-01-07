@@ -1,210 +1,269 @@
 using UnityEngine;
 
-/// <summary>
-/// Final (jitter-fixed) Movement Controller for top-down orthographic camera setups.
-///
-/// Key fixes:
-/// 1) Runs AFTER camera follow using DefaultExecutionOrder.
-/// 2) Uses LateUpdate so ray->plane projection is consistent with final camera transform.
-/// 3) Arrow length is WORLD distance from center to mouse projection on XZ plane (camera-size independent).
-/// 4) DualRingUIController clamps the VISUAL arrow length to outerRingRadius (Option A).
-/// </summary>
 [DefaultExecutionOrder(200)]
 public class MovementController : MonoBehaviour
 {
-    [Header("Camera / Input")]
-    [SerializeField] private Camera inputCamera; // Assign explicitly if possible for stability.
+    public enum MoveZone { None, Aim, Swim, Sprint }
 
-    [Header("Ring Thresholds (World Units)")]
-    [SerializeField] private float innerRingRadius = 1.0f;
-    [SerializeField] private float outerRingRadius = 3.0f;
+    [Header("References")]
+    [SerializeField] private Camera inputCamera;
+    [SerializeField] private DualRingUIController ui;
 
-    [Header("Speed")]
-    [SerializeField] private float maxSwimSpeed = 5f;          // Zone2 max
-    [SerializeField] private float maxSprintSpeed = 8f;        // Zone3 max
-    [SerializeField] private float acceleration = 12f;         // Speed ramp rate
-    [SerializeField] private float rotationLerp = 12f;         // Rotation slerp factor
-
-    [Header("Projection Plane")]
-    [Tooltip("If true, project mouse ray to a fixed Y plane (recommended for water surface).")]
+    [Header("Plane (Water Surface)")]
     [SerializeField] private bool useFixedPlaneY = true;
-
-    [Tooltip("Water surface Y, usually 0.")]
     [SerializeField] private float fixedPlaneY = 0f;
 
-    [Header("Optional Input Smoothing (extra anti-jitter)")]
-    [Tooltip("0 = no smoothing, higher = smoother but slightly more lag.")]
+    [Header("Speeds")]
+    [SerializeField] private float maxSwimSpeed = 5f;
+    [SerializeField] private float maxSprintSpeed = 8f;
+
+    [Header("Acceleration / Turning")]
+    [SerializeField] private float acceleration = 14f;
+    [SerializeField] private float turnRateDeg = 240f;
+    [SerializeField] private float sprintTurnRateDeg = 360f;
+
+    [Header("Carrot (Chase Target)")]
+    [SerializeField] private float carrotRadiusAim = 0.8f;
+    [SerializeField] private float carrotRadiusSwimMax = 2.8f;
+    [SerializeField] private float carrotRadiusSprint = 2.8f;
+    [SerializeField] private float keepDistance = 1.2f;
+    [SerializeField] private float carrotFollow = 18f;
+    [SerializeField] private float velocityDirectionLerp = 10f;
+
+    [Header("Input Smoothing")]
     [SerializeField] private float inputSmoothing = 0f;
 
     [Header("Debug")]
     [SerializeField] private bool debugDraw = false;
 
-    private DualRingUIController uiController;
-
     private bool isDragging;
-    private Vector3 moveDirection;     // world XZ direction
-    private float dragDistanceWorld;   // world distance used for zones
-    private float currentSpeed;
+    private Vector2 dirScreen = Vector2.up;
+    private float radiusPx;
 
-    // For smoothing
-    private Vector3 smoothedDir;
-    private float smoothedDist;
+    private Vector2 dirScreenSm = Vector2.up;
+    private float radiusPxSm;
+
+    private MoveZone zone = MoveZone.None;
+    private float currentSpeed;
+    private Vector3 velocity;
+
+    private Vector3 centerWorld;   // now = otter position (from UI)
+    private Vector3 carrotWorld;
+    private bool carrotInitialized;
+
+    private float PlaneY => useFixedPlaneY ? fixedPlaneY : transform.position.y;
 
     private void Start()
     {
         if (inputCamera == null) inputCamera = Camera.main;
-        uiController = FindObjectOfType<DualRingUIController>();
+        if (ui == null) ui = FindObjectOfType<DualRingUIController>();
 
-        if (uiController == null)
-            Debug.LogWarning("DualRingUIController not found. UI arrow/rings will not update.");
-
-        smoothedDir = Vector3.forward;
-        smoothedDist = 0f;
+        centerWorld = GetCenterWorld();
+        carrotWorld = centerWorld;
+        carrotInitialized = true;
     }
 
-    /// <summary>
-    /// LateUpdate to ensure camera follow (usually LateUpdate) has already updated the camera transform.
-    /// DefaultExecutionOrder(200) further increases the chance we run after the camera script.
-    /// </summary>
     private void LateUpdate()
     {
-        HandleInputLate();
-        ApplyMovementLate();
+        HandleInput();
+        ApplyMovement();
 
-        if (debugDraw)
-            DebugDraw();
+        if (debugDraw) DrawDebug();
     }
 
-    private void HandleInputLate()
+    private void HandleInput()
     {
         if (Input.GetMouseButtonDown(0))
         {
             isDragging = true;
             currentSpeed = 0f;
-
-            uiController?.SetCenter(transform.position);
+            velocity = Vector3.zero;
         }
 
         if (Input.GetMouseButtonUp(0))
         {
             isDragging = false;
+            zone = MoveZone.None;
             currentSpeed = 0f;
-            moveDirection = Vector3.zero;
-            dragDistanceWorld = 0f;
-
-            smoothedDist = 0f;
-            // keep smoothedDir as-is
-
-            uiController?.HideArrow();
+            velocity = Vector3.zero;
+            radiusPx = 0f;
+            radiusPxSm = 0f;
+            ui?.HideArrow();
             return;
         }
 
         if (!isDragging)
             return;
 
-        if (inputCamera == null)
-        {
-            uiController?.HideArrow();
-            return;
-        }
+        Vector2 center = (ui != null) ? ui.ScreenCenterPx : new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+        Vector2 mouse = Input.mousePosition;
+        Vector2 delta = mouse - center;
 
-        // 1) Ray -> plane (world mouse point)
-        float planeY = useFixedPlaneY ? fixedPlaneY : transform.position.y;
-        Plane plane = new Plane(Vector3.up, new Vector3(0f, planeY, 0f));
-        Ray ray = inputCamera.ScreenPointToRay(Input.mousePosition);
+        float rawR = delta.magnitude;
+        Vector2 rawDir = rawR > 1e-3f ? (delta / rawR) : Vector2.up;
 
-        if (!plane.Raycast(ray, out float hit))
-        {
-            moveDirection = Vector3.zero;
-            dragDistanceWorld = 0f;
-            uiController?.HideArrow();
-            return;
-        }
-
-        Vector3 mouseWorld = ray.GetPoint(hit);
-
-        // 2) Direction + Length in WORLD (XZ only)
-        Vector3 toMouse = mouseWorld - transform.position;
-        toMouse.y = 0f;
-
-        if (toMouse.sqrMagnitude < 0.0001f)
-        {
-            moveDirection = Vector3.zero;
-            dragDistanceWorld = 0f;
-            uiController?.UpdateArrow(transform.position, Vector3.zero, 0f);
-            return;
-        }
-
-        Vector3 targetDir = toMouse.normalized;
-        float targetDist = toMouse.magnitude;
-
-        // Optional smoothing (helps if mouse is noisy or camera follow still introduces tiny variance)
-        if (Application.isPlaying && inputSmoothing > 0f)
+        if (inputSmoothing > 0f)
         {
             float k = 1f - Mathf.Exp(-inputSmoothing * Time.deltaTime);
-            smoothedDir = Vector3.Slerp(smoothedDir, targetDir, k);
-            smoothedDist = Mathf.Lerp(smoothedDist, targetDist, k);
 
-            moveDirection = smoothedDir;
-            dragDistanceWorld = smoothedDist;
+            dirScreenSm = Vector2.Lerp(dirScreenSm, rawDir, k);
+            if (dirScreenSm.sqrMagnitude > 1e-6f) dirScreenSm.Normalize();
+
+            radiusPxSm = Mathf.Lerp(radiusPxSm, rawR, k);
+
+            dirScreen = dirScreenSm;
+            radiusPx = radiusPxSm;
         }
         else
         {
-            moveDirection = targetDir;
-            dragDistanceWorld = targetDist;
-
-            smoothedDir = targetDir;
-            smoothedDist = targetDist;
+            dirScreen = rawDir;
+            radiusPx = rawR;
+            dirScreenSm = rawDir;
+            radiusPxSm = rawR;
         }
 
-        // UI arrow: Option A (UI clamps visually to outerRingRadius)
-        uiController?.UpdateArrow(transform.position, moveDirection, dragDistanceWorld);
+        float innerPx = (ui != null) ? ui.InnerRadiusPx : 120f;
+        float outerPx = (ui != null) ? ui.OuterRadiusPx : 260f;
+
+        float clampedPx = Mathf.Clamp(radiusPx, 0f, outerPx);
+
+        if (clampedPx <= innerPx) zone = MoveZone.Aim;
+        else if (clampedPx < outerPx) zone = MoveZone.Swim;
+        else zone = MoveZone.Sprint;
+
+        ui?.UpdateArrowFromScreen(dirScreen, clampedPx);
     }
 
-    private void ApplyMovementLate()
+    private void ApplyMovement()
     {
-        if (!isDragging)
-            return;
+        if (!isDragging) return;
+        if (inputCamera == null) return;
 
-        if (moveDirection.sqrMagnitude < 0.0001f)
-            return;
+        centerWorld = GetCenterWorld();
 
-        // Rotate toward direction
-        Quaternion targetRot = Quaternion.LookRotation(moveDirection, Vector3.up);
-        transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, rotationLerp * Time.deltaTime);
+        float innerPx = (ui != null) ? ui.InnerRadiusPx : 120f;
+        float outerPx = (ui != null) ? ui.OuterRadiusPx : 260f;
+        float rClamped = Mathf.Clamp(radiusPx, 0f, outerPx);
 
-        // Zone 1: rotate only
-        if (dragDistanceWorld <= innerRingRadius)
+        float tBand = Mathf.InverseLerp(innerPx, outerPx, Mathf.Clamp(rClamped, innerPx, outerPx));
+        tBand = tBand * tBand * (3f - 2f * tBand);
+
+        Vector3 worldDir = ScreenDirToWorldXZ(dirScreen);
+        if (worldDir.sqrMagnitude < 1e-6f) return;
+
+        float desiredCarrotRadius =
+            zone == MoveZone.Aim ? carrotRadiusAim :
+            zone == MoveZone.Swim ? Mathf.Lerp(carrotRadiusAim, carrotRadiusSwimMax, tBand) :
+            carrotRadiusSprint;
+
+        // ===== carrot now anchored to CHARACTER-centered ring =====
+        Vector3 desiredCarrot = centerWorld + worldDir * desiredCarrotRadius;
+        desiredCarrot.y = PlaneY;
+
+        float dt = Time.deltaTime;
+        float k = 1f - Mathf.Exp(-Mathf.Max(0.01f, carrotFollow) * dt);
+        carrotWorld = carrotInitialized ? Vector3.Lerp(carrotWorld, desiredCarrot, k) : desiredCarrot;
+        carrotInitialized = true;
+
+        // never-catch behavior
+        if (zone == MoveZone.Swim || zone == MoveZone.Sprint)
         {
-            currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, acceleration * Time.deltaTime);
-            return;
+            Vector3 toCarrot = carrotWorld - transform.position;
+            toCarrot.y = 0f;
+            if (toCarrot.magnitude < keepDistance)
+            {
+                carrotWorld = transform.position + worldDir * keepDistance;
+                carrotWorld.y = PlaneY;
+            }
         }
 
-        // Zone 2: swim (speed mapped by distance)
-        if (dragDistanceWorld < outerRingRadius)
-        {
-            float t = Mathf.InverseLerp(innerRingRadius, outerRingRadius, dragDistanceWorld);
-            float targetSpeed = maxSwimSpeed * t;
+        float targetSpeed = 0f;
+        float turnRate = turnRateDeg;
 
-            currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, acceleration * Time.deltaTime);
-            transform.position += moveDirection * currentSpeed * Time.deltaTime;
-            return;
+        if (zone == MoveZone.Aim)
+        {
+            targetSpeed = 0f; // aim only (rotate)
+            turnRate = turnRateDeg;
+        }
+        else if (zone == MoveZone.Swim)
+        {
+            targetSpeed = maxSwimSpeed * tBand;
+            turnRate = turnRateDeg;
+        }
+        else
+        {
+            targetSpeed = maxSprintSpeed;
+            turnRate = sprintTurnRateDeg;
         }
 
-        // Zone 3: sprint
-        currentSpeed = Mathf.MoveTowards(currentSpeed, maxSprintSpeed, acceleration * Time.deltaTime);
-        transform.position += moveDirection * currentSpeed * Time.deltaTime;
+        currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, acceleration * dt);
+
+        Vector3 desiredMoveDir = carrotWorld - transform.position;
+        desiredMoveDir.y = 0f;
+        desiredMoveDir = desiredMoveDir.sqrMagnitude > 1e-6f ? desiredMoveDir.normalized : worldDir;
+
+        Vector3 desiredVel = desiredMoveDir * currentSpeed;
+
+        if (velocityDirectionLerp > 0f)
+        {
+            float kv = 1f - Mathf.Exp(-velocityDirectionLerp * dt);
+            velocity = Vector3.Lerp(velocity, desiredVel, kv);
+        }
+        else
+        {
+            velocity = desiredVel;
+        }
+
+        // translate only in swim/sprint
+        if (zone == MoveZone.Swim || zone == MoveZone.Sprint)
+            transform.position += velocity * dt;
+
+        // rotate toward velocity direction (or desiredMoveDir)
+        Vector3 faceDir = velocity.sqrMagnitude > 1e-6f ? velocity.normalized : desiredMoveDir;
+        faceDir.y = 0f;
+
+        if (faceDir.sqrMagnitude > 1e-6f)
+        {
+            Quaternion targetRot = Quaternion.LookRotation(faceDir, Vector3.up);
+            transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, turnRate * dt);
+        }
     }
 
-    private void DebugDraw()
+    private Vector3 GetCenterWorld()
     {
-        Debug.DrawLine(transform.position, transform.position + moveDirection * 2f, Color.green);
+        // Center is simply the otter position (ring under the otter)
+        Vector3 p = transform.position;
+        if (useFixedPlaneY) p.y = fixedPlaneY;
+        return p;
     }
 
-    // ===== Exposed for UI/other systems =====
-    public float GetInnerRingRadius() => innerRingRadius;
-    public float GetOuterRingRadius() => outerRingRadius;
+    private Vector3 ScreenDirToWorldXZ(Vector2 dir)
+    {
+        // For top-down cameras: use camera.up as screen-Y axis (not forward).
+        Vector3 camRight = inputCamera.transform.right; camRight.y = 0f;
+        Vector3 camUp = inputCamera.transform.up; camUp.y = 0f;
+
+        if (camRight.sqrMagnitude < 1e-6f) camRight = Vector3.right;
+        if (camUp.sqrMagnitude < 1e-6f) camUp = Vector3.forward;
+
+        camRight.Normalize();
+        camUp.Normalize();
+
+        Vector3 w = camRight * dir.x + camUp * dir.y;
+        w.y = 0f;
+        return w.sqrMagnitude > 1e-6f ? w.normalized : Vector3.forward;
+    }
+
+    private void DrawDebug()
+    {
+        Debug.DrawRay(centerWorld, Vector3.up * 0.4f, Color.cyan);
+        Debug.DrawLine(centerWorld, carrotWorld, Color.yellow);
+        Debug.DrawRay(transform.position, velocity, Color.green);
+    }
+
     public bool IsDragging() => isDragging;
-    public float GetDragDistanceWorld() => dragDistanceWorld;
-    public Vector3 GetMoveDirection() => moveDirection;
+    public MoveZone GetZone() => zone;
+    public bool IsSprinting() => zone == MoveZone.Sprint;
+    public Vector3 GetCarrotWorld() => carrotWorld;
+    public Vector3 GetVelocity() => velocity;
 }
