@@ -1,56 +1,79 @@
 using UnityEngine;
 
+/// <summary>
+/// Refined SoftSpineDriver (Top-down, Y-up, XZ movement) with:
+/// - Yaw-only bending (prevents "looking toward sky").
+/// - Rig axis support (your cat/otter head forward axis is +Y).
+/// - Stable direction source priority: velocity (optional) -> target -> fallback.
+/// - Per-bone soft follow + tail lag (fish-like softness).
+/// - Per-bone bend limit from bind pose (safety).
+///
+/// IMPORTANT SETUP:
+/// 1) bones: drag spine bones in order FRONT -> BACK (chest/neck -> pelvis/tailRoot)
+/// 2) target: set to your HeadIK_Guide (recommended) and keep its Y locked to water plane or head height.
+/// 3) If your rig's "forward" is +Y, keep boneForwardAxis = LocalY (default).
+/// </summary>
 [ExecuteAlways]
-public class SoftSpineDriver : MonoBehaviour
+public class SoftSpineDriverRefined : MonoBehaviour
 {
+    public enum BoneForwardAxis { LocalX, LocalY, LocalZ }
+
     [Header("Spine bones (front -> back)")]
     public Transform[] bones;
 
-    [Header("Direction source (optional)")]
-    public Transform target;                 // 若设置：朝向 target
-    public Rigidbody rb;                     // 若设置：用速度方向（可选）
-    public bool useVelocityIfAvailable = true;
+    [Header("Desired Direction Source (priority: velocity -> target -> fallback)")]
+    public bool useVelocityIfAvailable = false;
+    public Rigidbody rb;
 
-    [Header("Plane / Up")]
-    public bool constrainToXZ = true;         // 你的项目是Y向上，运动主要在XZ
-    public Vector3 worldUp = default;         // 默认 Vector3.up
+    [Tooltip("If set, spine bends toward this target (recommended: HeadIK_Guide).")]
+    public Transform target;
+
+    [Header("Top-down Constraints")]
+    [Tooltip("Project all direction to XZ plane and rotate only around worldUp.")]
+    public bool yawOnly = true;
+
+    [Tooltip("World up axis for your game. Usually Vector3.up.")]
+    public Vector3 worldUp = Vector3.up;
+
+    [Tooltip("If true, desired direction is projected onto plane orthogonal to worldUp (XZ).")]
+    public bool constrainToXZ = true;
+
+    [Header("Rig Axis (CRITICAL)")]
+    [Tooltip("Which LOCAL axis of each bone points forward along the character (nose direction). For your cat/otter head: LocalY.")]
+    public BoneForwardAxis boneForwardAxis = BoneForwardAxis.LocalY;
+
+    [Tooltip("Which LOCAL axis of the bone represents 'up' for stabilizing twist (rarely needed in yawOnly mode).")]
+    public BoneForwardAxis boneUpAxis = BoneForwardAxis.LocalZ;
 
     [Header("Softness")]
-    [Tooltip("头部跟随快，尾部跟随慢。值越大整体越硬。")]
+    [Tooltip("Overall responsiveness. Higher = stiffer (more immediate).")]
     public float baseFollowSpeed = 12f;
 
-    [Tooltip("尾部额外变慢的倍率（>1更软）。")]
+    [Tooltip("Tail is slower than head. >1 makes tail lag more (softer).")]
     public float tailLagMultiplier = 3.0f;
 
-    [Tooltip("每节骨骼允许偏离其bind pose的最大角度（度）。")]
-    public float maxBendDegPerBone = 25f;
-
-    [Tooltip("沿链条分布跟随权重：越大越“头跟、尾不跟”（更像鱼）。")]
+    [Tooltip("Head-to-tail influence curve. Higher = head follows more strongly, tail follows less.")]
     public float headInfluencePower = 1.6f;
 
-    [Header("Optional wave (very subtle)")]
-    public bool addWave = false;
-    public float waveYawDeg = 6f;             // 只做很小的“摆”
-    public float waveFrequency = 1.2f;        // Hz
-    public float wavePhasePerBone = 0.35f;    // 沿骨骼相位差
-    public float waveTailBoost = 1.8f;        // 尾部摆幅更大
+    [Tooltip("Max degrees each bone may deviate from its bind/rest local rotation.")]
+    public float maxBendDegPerBone = 25f;
 
-    [Header("Gizmos")]
+    [Header("Optional (very subtle) wave")]
+    public bool addWave = false;
+    public float waveYawDeg = 5f;
+    public float waveFrequency = 1.2f;
+    public float wavePhasePerBone = 0.35f;
+    public float waveTailBoost = 1.8f;
+
+    [Header("Debug")]
     public bool drawGizmos = true;
     public float gizmoAxisLen = 0.15f;
 
-    Quaternion[] restLocalRot;
-    Transform[] parents; // cache
+    private Quaternion[] restLocalRot;
+    private Transform[] parents;
 
-    void Awake()
-    {
-        InitCache();
-    }
-
-    void OnEnable()
-    {
-        InitCache();
-    }
+    void Awake() => InitCache();
+    void OnEnable() => InitCache();
 
     void InitCache()
     {
@@ -58,6 +81,7 @@ public class SoftSpineDriver : MonoBehaviour
 
         restLocalRot = new Quaternion[bones.Length];
         parents = new Transform[bones.Length];
+
         for (int i = 0; i < bones.Length; i++)
         {
             if (!bones[i]) continue;
@@ -65,41 +89,55 @@ public class SoftSpineDriver : MonoBehaviour
             parents[i] = bones[i].parent;
         }
 
-        if (worldUp == default) worldUp = Vector3.up;
+        if (worldUp.sqrMagnitude < 1e-6f) worldUp = Vector3.up;
+        worldUp.Normalize();
     }
 
     void LateUpdate()
     {
         if (bones == null || bones.Length < 2) return;
         if (restLocalRot == null || restLocalRot.Length != bones.Length) InitCache();
-        if (worldUp == default) worldUp = Vector3.up;
+        if (worldUp.sqrMagnitude < 1e-6f) worldUp = Vector3.up;
+        worldUp.Normalize();
 
-        // 1) 计算“想朝向的方向”
         Vector3 desiredDir = GetDesiredDirection();
         if (desiredDir.sqrMagnitude < 1e-6f) return;
 
-        // 2) 沿链条逐节设置旋转（只改 localRotation，让 skin 自己弯）
+        if (constrainToXZ)
+        {
+            desiredDir = Vector3.ProjectOnPlane(desiredDir, worldUp);
+            if (desiredDir.sqrMagnitude < 1e-6f) return;
+            desiredDir.Normalize();
+        }
+
+        // Reference forward direction in world (flat)
+        Vector3 refForward = Vector3.ProjectOnPlane(transform.forward, worldUp);
+        if (refForward.sqrMagnitude < 1e-6f) refForward = Vector3.forward;
+        refForward.Normalize();
+
         for (int i = 0; i < bones.Length; i++)
         {
             Transform b = bones[i];
             if (!b) continue;
 
-            float t = (bones.Length == 1) ? 0f : (float)i / (bones.Length - 1); // 0=head/front, 1=tail/back
+            float t = (bones.Length == 1) ? 0f : (float)i / (bones.Length - 1);  // 0 front, 1 back
 
-            // 跟随权重：头部更贴近 desiredDir，尾部更保留原方向（产生弯曲）
+            // How strongly this bone should follow the global desired direction (front > back)
             float followAlpha = Mathf.Pow(1f - t, headInfluencePower);
 
-            // 目标方向：在“当前朝向”和“desiredDir”之间插值（越靠后越不跟）
-            Vector3 currentFwd = b.forward;
-            if (constrainToXZ)
-            {
-                currentFwd = Vector3.ProjectOnPlane(currentFwd, worldUp);
-            }
-            currentFwd = currentFwd.sqrMagnitude < 1e-6f ? desiredDir : currentFwd.normalized;
+            // Current bone forward (in world), flattened
+            Vector3 boneFwdWorld = GetBoneForwardWorld(b);
+            if (constrainToXZ) boneFwdWorld = Vector3.ProjectOnPlane(boneFwdWorld, worldUp);
+            if (boneFwdWorld.sqrMagnitude < 1e-6f) boneFwdWorld = desiredDir;
+            boneFwdWorld.Normalize();
 
-            Vector3 boneDesiredDir = Vector3.Slerp(desiredDir, currentFwd, 1f - followAlpha).normalized;
+            // Blend desired vs current so tail lags behind
+            Vector3 boneDesiredDir = Vector3.Slerp(desiredDir, boneFwdWorld, 1f - followAlpha);
+            if (constrainToXZ) boneDesiredDir = Vector3.ProjectOnPlane(boneDesiredDir, worldUp);
+            if (boneDesiredDir.sqrMagnitude < 1e-6f) continue;
+            boneDesiredDir.Normalize();
 
-            // 可选：给一点点尾部更明显的波浪（非常小，主要用来“活”）
+            // Optional subtle wave (yaw only)
             if (addWave)
             {
                 float tailBoost = Mathf.Lerp(1f, waveTailBoost, t);
@@ -109,18 +147,20 @@ public class SoftSpineDriver : MonoBehaviour
                 boneDesiredDir.Normalize();
             }
 
-            // 目标 world rotation（用 worldUp 锁住翻滚，避免扭麻花）
-            Quaternion targetWorldRot = Quaternion.LookRotation(boneDesiredDir, worldUp);
+            // Build target world rotation
+            Quaternion targetWorldRot = yawOnly
+                ? BuildYawOnlyTargetWorldRotation(i, b, refForward, boneDesiredDir)
+                : BuildFull3DTargetWorldRotation(boneDesiredDir);
 
-            // 转回 local rotation
+            // Convert to target local rotation
             Transform p = parents[i];
             Quaternion parentWorldRot = p ? p.rotation : Quaternion.identity;
             Quaternion targetLocal = Quaternion.Inverse(parentWorldRot) * targetWorldRot;
 
-            // 3) 限制每节偏离 bind pose 的最大弯曲角（防折）
+            // Bend limit around bind pose
             Quaternion limitedLocal = LimitFromRest(targetLocal, restLocalRot[i], maxBendDegPerBone);
 
-            // 4) 柔化：头快尾慢（尾部 lag 更大）
+            // Smooth follow (tail slower)
             float speed = baseFollowSpeed / Mathf.Lerp(1f, tailLagMultiplier, t);
             float dt = Application.isPlaying ? Time.deltaTime : 0.016f;
             float k = 1f - Mathf.Exp(-speed * dt);
@@ -133,7 +173,6 @@ public class SoftSpineDriver : MonoBehaviour
     {
         Vector3 dir = Vector3.zero;
 
-        // 优先用速度方向（如果你有刚体）
         if (useVelocityIfAvailable && rb)
         {
             Vector3 v = rb.velocity;
@@ -141,15 +180,13 @@ public class SoftSpineDriver : MonoBehaviour
             if (v.sqrMagnitude > 0.0001f) dir = v.normalized;
         }
 
-        // 其次用 target（比如鼠标投影点/前进目标）
-        if (dir.sqrMagnitude < 1e-6f && target && bones[0])
+        if (dir.sqrMagnitude < 1e-6f && target && bones != null && bones.Length > 0 && bones[0])
         {
-            dir = (target.position - bones[0].position);
+            dir = target.position - bones[0].position;
             if (constrainToXZ) dir = Vector3.ProjectOnPlane(dir, worldUp);
-            if (dir.sqrMagnitude > 1e-6f) dir = dir.normalized;
+            if (dir.sqrMagnitude > 1e-6f) dir.Normalize();
         }
 
-        // 最后 fallback：用当前物体 forward
         if (dir.sqrMagnitude < 1e-6f)
         {
             dir = transform.forward;
@@ -160,20 +197,64 @@ public class SoftSpineDriver : MonoBehaviour
         return dir;
     }
 
+    Vector3 GetBoneForwardWorld(Transform bone)
+    {
+        switch (boneForwardAxis)
+        {
+            case BoneForwardAxis.LocalX: return bone.right;
+            case BoneForwardAxis.LocalY: return bone.up;
+            default: return bone.forward; // LocalZ
+        }
+    }
+
+    Vector3 GetBoneUpWorld(Transform bone)
+    {
+        switch (boneUpAxis)
+        {
+            case BoneForwardAxis.LocalX: return bone.right;
+            case BoneForwardAxis.LocalY: return bone.up;
+            default: return bone.forward;
+        }
+    }
+
+    Quaternion BuildFull3DTargetWorldRotation(Vector3 desiredDir)
+    {
+        // Full 3D aiming (may pitch). Kept for completeness.
+        return Quaternion.LookRotation(desiredDir, worldUp);
+    }
+
+    Quaternion BuildYawOnlyTargetWorldRotation(int boneIndex, Transform bone, Vector3 refForwardFlat, Vector3 desiredDirFlat)
+    {
+        // We want to rotate around worldUp only, but respecting that the bone's "forward" might be local Y.
+        // Strategy:
+        // 1) Compute a world-space yaw rotation that maps refForwardFlat -> desiredDirFlat around worldUp.
+        // 2) Apply that yaw rotation onto this bone's "rest world rotation" (parent * restLocalRot).
+        Transform p = parents[boneIndex];
+        Quaternion parentWorldRot = p ? p.rotation : Quaternion.identity;
+
+        Quaternion restWorldRot = parentWorldRot * restLocalRot[boneIndex];
+
+        // Compute yaw from reference forward to desired direction
+        float yawDeg = Vector3.SignedAngle(refForwardFlat, desiredDirFlat, worldUp);
+        Quaternion yawRot = Quaternion.AngleAxis(yawDeg, worldUp);
+
+        // Apply yaw onto the rest pose
+        // This keeps the bone from pitching toward sky regardless of bone forward axis.
+        return yawRot * restWorldRot;
+    }
+
     static Quaternion LimitFromRest(Quaternion targetLocal, Quaternion restLocal, float maxDeg)
     {
         if (maxDeg <= 0f) return restLocal;
 
-        // delta = rest^-1 * target
         Quaternion delta = Quaternion.Inverse(restLocal) * targetLocal;
-
         delta.ToAngleAxis(out float angle, out Vector3 axis);
-        if (float.IsNaN(axis.x) || axis.sqrMagnitude < 1e-6f) return restLocal;
 
-        // angle 是 0..180
+        if (float.IsNaN(axis.x) || axis.sqrMagnitude < 1e-6f)
+            return restLocal;
+
         float clamped = Mathf.Min(angle, maxDeg);
         Quaternion limitedDelta = Quaternion.AngleAxis(clamped, axis.normalized);
-
         return restLocal * limitedDelta;
     }
 
@@ -187,12 +268,9 @@ public class SoftSpineDriver : MonoBehaviour
             if (!bones[i]) continue;
 
             Vector3 p = bones[i].position;
-            Vector3 f = bones[i].forward * gizmoAxisLen;
-            Vector3 r = bones[i].right * (gizmoAxisLen * 0.7f);
+            Gizmos.DrawLine(p, p + GetBoneForwardWorld(bones[i]).normalized * gizmoAxisLen);
 
-            Gizmos.DrawLine(p, p + f);
-            Gizmos.DrawLine(p, p + r);
-
+            // Draw chain
             if (i < bones.Length - 1 && bones[i + 1])
                 Gizmos.DrawLine(p, bones[i + 1].position);
         }
