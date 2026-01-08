@@ -1,3 +1,4 @@
+// MovementController.cs
 using UnityEngine;
 
 [DefaultExecutionOrder(200)]
@@ -13,257 +14,330 @@ public class MovementController : MonoBehaviour
     [SerializeField] private bool useFixedPlaneY = true;
     [SerializeField] private float fixedPlaneY = 0f;
 
-    [Header("Speeds")]
-    [SerializeField] private float maxSwimSpeed = 5f;
-    [SerializeField] private float maxSprintSpeed = 8f;
+    [Header("Speeds (forward only)")]
+    [SerializeField] private float swimSpeed = 2.4f;
+    [SerializeField] private float sprintSpeed = 4.2f;
+    [SerializeField] private float speedAcceleration = 10f; // how quickly currentSpeed reaches targetSpeed
 
-    [Header("Acceleration / Turning")]
-    [SerializeField] private float acceleration = 14f;
-    [SerializeField] private float turnRateDeg = 240f;
-    [SerializeField] private float sprintTurnRateDeg = 360f;
+    [Header("Turning (RootMotionSection style)")]
+    [Tooltip("At 0 speed, max turn speed (deg/s).")]
+    [SerializeField] private float turnSpeedAtStop = 540f;
 
-    [Header("Carrot (Chase Target)")]
-    [SerializeField] private float carrotRadiusAim = 0.8f;
-    [SerializeField] private float carrotRadiusSwimMax = 2.8f;
-    [SerializeField] private float carrotRadiusSprint = 2.8f;
-    [SerializeField] private float keepDistance = 1.2f;
-    [SerializeField] private float carrotFollow = 18f;
-    [SerializeField] private float velocityDirectionLerp = 10f;
+    [Tooltip("At max (sprint) speed, max turn speed (deg/s). Should be LOWER than turnSpeedAtStop.")]
+    [SerializeField] private float turnSpeedAtMaxSpeed = 180f;
 
-    [Header("Input Smoothing")]
-    [SerializeField] private float inputSmoothing = 0f;
+    [Tooltip("At 0 speed, turn acceleration (deg/s^2).")]
+    [SerializeField] private float turnAccelAtStop = 4500f;
+
+    [Tooltip("At max (sprint) speed, turn acceleration (deg/s^2). Should be LOWER than turnAccelAtStop.")]
+    [SerializeField] private float turnAccelAtMaxSpeed = 1200f;
+
+    [Tooltip("Angle (deg) below which turnCurve is 0.")]
+    [SerializeField] private float turnCurveStartAngle = 10f;
+
+    [Tooltip("Angle (deg) above which turnCurve is 1 (full turn speed).")]
+    [SerializeField] private float turnCurveFullAngle = 60f;
+
+    [Tooltip("If abs(angle) exceeds this, we stop moving and prioritize turning. Set <=0 to disable.")]
+    [SerializeField] private float moveWhenFacingAngle = 95f;
+
+    [Header("Turn slows movement")]
+    [Tooltip("Minimum multiplier applied to forward speed when turning hard.")]
+    [Range(0.05f, 1f)]
+    [SerializeField] private float turnSlowMin = 0.45f;
+
+    [Tooltip("How strongly angular speed reduces forward speed (0 disables).")]
+    [SerializeField] private float turnSlowByOmega = 1.0f;
+
+    [Header("Input smoothing (screen space)")]
+    [SerializeField] private float inputSmoothing = 18f;
+
+    [Header("Carrot / Guide")]
+    [Tooltip("Distance ahead (world units) for Aim zone guide.")]
+    [SerializeField] private float carrotRadiusAim = 1.5f;
+
+    [Tooltip("Distance ahead (world units) for Swim zone guide.")]
+    [SerializeField] private float carrotRadiusSwim = 2.2f;
+
+    [Tooltip("Distance ahead (world units) for Sprint zone guide.")]
+    [SerializeField] private float carrotRadiusSprint = 3.0f;
 
     [Header("Debug")]
-    [SerializeField] private bool debugDraw = false;
+    [SerializeField] private bool drawDebug = true;
 
+    // ===== runtime state =====
     private bool isDragging;
-    private Vector2 dirScreen = Vector2.up;
-    private float radiusPx;
-
-    private Vector2 dirScreenSm = Vector2.up;
-    private float radiusPxSm;
+    private Vector2 dirScreen;        // raw screen-space direction (normalized)
+    private float radiusPx;           // raw radius (px)
+    private Vector2 dirScreenSm;      // smoothed
+    private float radiusPxSm;         // smoothed
 
     private MoveZone zone = MoveZone.None;
+
     private float currentSpeed;
-    private Vector3 velocity;
+    private float currentOmegaDeg;    // signed angular velocity (deg/s)
 
-    private Vector3 centerWorld;   // now = otter position (from UI)
-    private Vector3 carrotWorld;
-    private bool carrotInitialized;
+    private Vector3 worldDir = Vector3.forward;  // desired direction on XZ
+    private Vector3 velocity;                  // current forward velocity in world
+    private Vector3 carrotWorld;               // guide point ahead in desired direction
+    private Vector3 centerWorld;               // anchor projection on plane
 
-    private float PlaneY => useFixedPlaneY ? fixedPlaneY : transform.position.y;
+    private void Reset()
+    {
+        inputCamera = Camera.main;
+    }
 
-    private void Start()
+    private void Awake()
     {
         if (inputCamera == null) inputCamera = Camera.main;
-        if (ui == null) ui = FindObjectOfType<DualRingUIController>();
-
-        centerWorld = GetCenterWorld();
-        carrotWorld = centerWorld;
-        carrotInitialized = true;
     }
 
-    private void LateUpdate()
+    private void Update()
     {
         HandleInput();
-        ApplyMovement();
-
-        if (debugDraw) DrawDebug();
+        UpdateIntentAndCarrot();
+        ApplyRootMotionTurnAndMove();
     }
+
+    // ---------------- Input ----------------
 
     private void HandleInput()
     {
         if (Input.GetMouseButtonDown(0))
         {
             isDragging = true;
-            currentSpeed = 0f;
-            velocity = Vector3.zero;
-        }
 
-        if (Input.GetMouseButtonUp(0))
-        {
-            isDragging = false;
-            zone = MoveZone.None;
-            currentSpeed = 0f;
-            velocity = Vector3.zero;
-            radiusPx = 0f;
-            radiusPxSm = 0f;
-            ui?.HideArrow();
-            return;
-        }
-
-        if (!isDragging)
-            return;
-
-        Vector2 center = (ui != null) ? ui.ScreenCenterPx : new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-        Vector2 mouse = Input.mousePosition;
-        Vector2 delta = mouse - center;
-
-        float rawR = delta.magnitude;
-        Vector2 rawDir = rawR > 1e-3f ? (delta / rawR) : Vector2.up;
-
-        if (inputSmoothing > 0f)
-        {
-            float k = 1f - Mathf.Exp(-inputSmoothing * Time.deltaTime);
-
-            dirScreenSm = Vector2.Lerp(dirScreenSm, rawDir, k);
-            if (dirScreenSm.sqrMagnitude > 1e-6f) dirScreenSm.Normalize();
-
-            radiusPxSm = Mathf.Lerp(radiusPxSm, rawR, k);
-
-            dirScreen = dirScreenSm;
-            radiusPx = radiusPxSm;
-        }
-        else
-        {
+            // snap smoothing on start (prevents jump)
+            Vector2 rawDir = GetDirFromCenter(Input.mousePosition, out float rawR);
             dirScreen = rawDir;
             radiusPx = rawR;
             dirScreenSm = rawDir;
             radiusPxSm = rawR;
+
+            // do not hard reset speed here; let acceleration handle continuity
         }
+        else if (Input.GetMouseButtonUp(0))
+        {
+            isDragging = false;
+            zone = MoveZone.None;
+            // keep direction for idle head guide, but speed will decay to 0
+        }
+
+        if (!isDragging) return;
+
+        Vector2 newDir = GetDirFromCenter(Input.mousePosition, out float newR);
+        dirScreen = newDir;
+        radiusPx = newR;
+
+        // smooth in screen space
+        float dt = Time.deltaTime;
+        float k = inputSmoothing <= 0f ? 1f : (1f - Mathf.Exp(-inputSmoothing * dt));
+        dirScreenSm = Vector2.Lerp(dirScreenSm, dirScreen, k);
+        radiusPxSm = Mathf.Lerp(radiusPxSm, radiusPx, k);
 
         float innerPx = (ui != null) ? ui.InnerRadiusPx : 120f;
         float outerPx = (ui != null) ? ui.OuterRadiusPx : 260f;
 
-        float clampedPx = Mathf.Clamp(radiusPx, 0f, outerPx);
+        float clampedPx = Mathf.Clamp(radiusPxSm, 0f, outerPx);
 
         if (clampedPx <= innerPx) zone = MoveZone.Aim;
         else if (clampedPx < outerPx) zone = MoveZone.Swim;
         else zone = MoveZone.Sprint;
 
-        ui?.UpdateArrowFromScreen(dirScreen, clampedPx);
+        //ui?.UpdateArrowFromScreen(dirScreenSm, clampedPx);
+        ui?.SetArrowInput(dirScreenSm, clampedPx);
     }
 
-    private void ApplyMovement()
+    private Vector2 GetDirFromCenter(Vector3 mousePos, out float radius)
     {
-        if (!isDragging) return;
-        if (inputCamera == null) return;
+        Vector2 center = (ui != null) ? ui.ScreenCenterPx : new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+        Vector2 delta = (Vector2)mousePos - center;
+        radius = delta.magnitude;
+        return (radius > 1e-4f) ? (delta / radius) : Vector2.up;
+    }
 
+    // ---------------- Intent / carrot ----------------
+
+    private void UpdateIntentAndCarrot()
+    {
+        // center on plane (for debug + carrot stability)
         centerWorld = GetCenterWorld();
 
-        float innerPx = (ui != null) ? ui.InnerRadiusPx : 120f;
-        float outerPx = (ui != null) ? ui.OuterRadiusPx : 260f;
-        float rClamped = Mathf.Clamp(radiusPx, 0f, outerPx);
-
-        float tBand = Mathf.InverseLerp(innerPx, outerPx, Mathf.Clamp(rClamped, innerPx, outerPx));
-        tBand = tBand * tBand * (3f - 2f * tBand);
-
-        Vector3 worldDir = ScreenDirToWorldXZ(dirScreen);
-        if (worldDir.sqrMagnitude < 1e-6f) return;
-
-        float desiredCarrotRadius =
-            zone == MoveZone.Aim ? carrotRadiusAim :
-            zone == MoveZone.Swim ? Mathf.Lerp(carrotRadiusAim, carrotRadiusSwimMax, tBand) :
-            carrotRadiusSprint;
-
-        // ===== carrot now anchored to CHARACTER-centered ring =====
-        Vector3 desiredCarrot = centerWorld + worldDir * desiredCarrotRadius;
-        desiredCarrot.y = PlaneY;
-
-        float dt = Time.deltaTime;
-        float k = 1f - Mathf.Exp(-Mathf.Max(0.01f, carrotFollow) * dt);
-        carrotWorld = carrotInitialized ? Vector3.Lerp(carrotWorld, desiredCarrot, k) : desiredCarrot;
-        carrotInitialized = true;
-
-        // never-catch behavior
-        if (zone == MoveZone.Swim || zone == MoveZone.Sprint)
+        // update desired worldDir only when dragging (otherwise keep last)
+        if (isDragging && inputCamera != null)
         {
-            Vector3 toCarrot = carrotWorld - transform.position;
-            toCarrot.y = 0f;
-            if (toCarrot.magnitude < keepDistance)
-            {
-                carrotWorld = transform.position + worldDir * keepDistance;
-                carrotWorld.y = PlaneY;
-            }
+            worldDir = ScreenDirToWorldXZ(dirScreenSm, inputCamera.transform);
+            if (worldDir.sqrMagnitude < 1e-6f)
+                worldDir = transform.forward;
+
+            worldDir.y = 0f;
+            worldDir = worldDir.sqrMagnitude > 1e-6f ? worldDir.normalized : Vector3.forward;
         }
 
-        float targetSpeed = 0f;
-        float turnRate = turnRateDeg;
+        // choose carrot radius by zone
+        float r = carrotRadiusAim;
+        if (zone == MoveZone.Swim) r = carrotRadiusSwim;
+        else if (zone == MoveZone.Sprint) r = carrotRadiusSprint;
 
-        if (zone == MoveZone.Aim)
-        {
-            targetSpeed = 0f; // aim only (rotate)
-            turnRate = turnRateDeg;
-        }
-        else if (zone == MoveZone.Swim)
-        {
-            targetSpeed = maxSwimSpeed * tBand;
-            turnRate = turnRateDeg;
-        }
-        else
-        {
-            targetSpeed = maxSprintSpeed;
-            turnRate = sprintTurnRateDeg;
-        }
+        Vector3 anchor = transform.position;
+        anchor.y = PlaneY;
 
-        currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, acceleration * dt);
-
-        Vector3 desiredMoveDir = carrotWorld - transform.position;
-        desiredMoveDir.y = 0f;
-        desiredMoveDir = desiredMoveDir.sqrMagnitude > 1e-6f ? desiredMoveDir.normalized : worldDir;
-
-        Vector3 desiredVel = desiredMoveDir * currentSpeed;
-
-        if (velocityDirectionLerp > 0f)
-        {
-            float kv = 1f - Mathf.Exp(-velocityDirectionLerp * dt);
-            velocity = Vector3.Lerp(velocity, desiredVel, kv);
-        }
-        else
-        {
-            velocity = desiredVel;
-        }
-
-        // translate only in swim/sprint
-        if (zone == MoveZone.Swim || zone == MoveZone.Sprint)
-            transform.position += velocity * dt;
-
-        // rotate toward velocity direction (or desiredMoveDir)
-        Vector3 faceDir = velocity.sqrMagnitude > 1e-6f ? velocity.normalized : desiredMoveDir;
-        faceDir.y = 0f;
-
-        if (faceDir.sqrMagnitude > 1e-6f)
-        {
-            Quaternion targetRot = Quaternion.LookRotation(faceDir, Vector3.up);
-            transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, turnRate * dt);
-        }
+        carrotWorld = anchor + worldDir * r;
+        carrotWorld.y = PlaneY;
     }
+
+    private float PlaneY => useFixedPlaneY ? fixedPlaneY : transform.position.y;
 
     private Vector3 GetCenterWorld()
     {
-        // Center is simply the otter position (ring under the otter)
         Vector3 p = transform.position;
-        if (useFixedPlaneY) p.y = fixedPlaneY;
+        p.y = PlaneY;
         return p;
     }
 
-    private Vector3 ScreenDirToWorldXZ(Vector2 dir)
+    // Maps a screen-space direction (x = right, y = up) into world XZ using camera basis.
+    // This is robust for your top-down orthographic camera.
+    private static Vector3 ScreenDirToWorldXZ(Vector2 screenDir, Transform cam)
     {
-        // For top-down cameras: use camera.up as screen-Y axis (not forward).
-        Vector3 camRight = inputCamera.transform.right; camRight.y = 0f;
-        Vector3 camUp = inputCamera.transform.up; camUp.y = 0f;
+        Vector3 right = cam.right;
+        Vector3 up = cam.up;
 
-        if (camRight.sqrMagnitude < 1e-6f) camRight = Vector3.right;
-        if (camUp.sqrMagnitude < 1e-6f) camUp = Vector3.forward;
+        Vector3 w = right * screenDir.x + up * screenDir.y;
 
-        camRight.Normalize();
-        camUp.Normalize();
-
-        Vector3 w = camRight * dir.x + camUp * dir.y;
+        // Project to XZ plane
         w.y = 0f;
+        if (w.sqrMagnitude < 1e-6f)
+        {
+            // Fallback: camera-forward projected
+            w = cam.forward;
+            w.y = 0f;
+        }
+
         return w.sqrMagnitude > 1e-6f ? w.normalized : Vector3.forward;
     }
 
-    private void DrawDebug()
+    // ---------------- RootMotionSection-style turn + move ----------------
+
+    private void ApplyRootMotionTurnAndMove()
     {
-        Debug.DrawRay(centerWorld, Vector3.up * 0.4f, Color.cyan);
-        Debug.DrawLine(centerWorld, carrotWorld, Color.yellow);
-        Debug.DrawRay(transform.position, velocity, Color.green);
+        float dt = Time.deltaTime;
+
+        // Determine target speed from zone (forward-only; no reverse).
+        float targetSpeed = 0f;
+        if (isDragging)
+        {
+            if (zone == MoveZone.Swim) targetSpeed = swimSpeed;
+            else if (zone == MoveZone.Sprint) targetSpeed = sprintSpeed;
+            else targetSpeed = 0f; // Aim or None
+        }
+
+        // Smooth speed
+        currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, speedAcceleration * dt);
+
+        // Turning target direction: always toward "worldDir" (which is the same direction we use for carrot).
+        Vector3 up = Vector3.up;
+        Vector3 fwd = transform.forward;
+        fwd.y = 0f;
+        if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
+        fwd.Normalize();
+
+        Vector3 desired = worldDir;
+        desired.y = 0f;
+        if (desired.sqrMagnitude < 1e-6f) desired = fwd;
+        desired.Normalize();
+
+        float ang = Vector3.SignedAngle(fwd, desired, up);
+        float absAng = Mathf.Abs(ang);
+
+        // Turn ability decreases with speed
+        float maxSpeed = Mathf.Max(swimSpeed, sprintSpeed, 0.0001f);
+        float speed01 = Mathf.Clamp01(currentSpeed / maxSpeed);
+
+        float turnSpeed = Mathf.Lerp(turnSpeedAtStop, turnSpeedAtMaxSpeed, speed01);
+        float turnAccel = Mathf.Lerp(turnAccelAtStop, turnAccelAtMaxSpeed, speed01);
+
+        // Gecko-like curve from angle to target omega
+        float curve = Mathf.InverseLerp(turnCurveStartAngle, turnCurveFullAngle, absAng);
+        curve = Mathf.Clamp01(curve);
+
+        float targetOmega = Mathf.Sign(ang) * (turnSpeed * curve);
+
+        // Smooth omega
+        currentOmegaDeg = Mathf.MoveTowards(currentOmegaDeg, targetOmega, turnAccel * dt);
+
+        // Optionally stop moving if not facing enough
+        bool blockMoveForFacing = (moveWhenFacingAngle > 0f) && (absAng > moveWhenFacingAngle);
+
+        // Turn slows movement (using omega ratio)
+        float omegaRatio = (turnSpeed > 1e-3f) ? Mathf.Clamp01(Mathf.Abs(currentOmegaDeg) / turnSpeed) : 0f;
+        float slowByOmega = Mathf.Lerp(1f, turnSlowMin, omegaRatio * Mathf.Clamp01(turnSlowByOmega));
+
+        float moveSpeed = (blockMoveForFacing ? 0f : currentSpeed) * slowByOmega;
+
+        // Apply rotation (yaw only)
+        if (Mathf.Abs(currentOmegaDeg) > 1e-4f)
+        {
+            transform.Rotate(up, currentOmegaDeg * dt, Space.World);
+        }
+
+        // Apply translation (forward only, on plane)
+        Vector3 newForward = transform.forward;
+        newForward.y = 0f;
+        if (newForward.sqrMagnitude < 1e-6f) newForward = desired;
+        newForward.Normalize();
+
+        velocity = newForward * moveSpeed;
+
+        if (moveSpeed > 1e-5f)
+        {
+            Vector3 pos = transform.position;
+            pos += velocity * dt;
+            pos.y = PlaneY;
+            transform.position = pos;
+        }
+        else
+        {
+            // keep y on plane even when idle
+            Vector3 pos = transform.position;
+            pos.y = PlaneY;
+            transform.position = pos;
+        }
+
+        // Keep carrot locked to input intent rather than body forward (so head can lead)
+        // (carrotWorld already updated from worldDir in UpdateIntentAndCarrot)
     }
 
+    private void OnDrawGizmos()
+    {
+        if (!drawDebug) return;
+
+        Gizmos.color = Color.cyan;
+        Gizmos.DrawSphere(GetCenterWorld(), 0.05f);
+
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawLine(GetCenterWorld(), carrotWorld);
+        Gizmos.DrawSphere(carrotWorld, 0.06f);
+
+        Gizmos.color = Color.green;
+        Gizmos.DrawLine(transform.position, transform.position + velocity);
+    }
+
+    // ===== Exposed for IK / camera =====
     public bool IsDragging() => isDragging;
     public MoveZone GetZone() => zone;
     public bool IsSprinting() => zone == MoveZone.Sprint;
+
+    /// <summary>World-space guide point ahead of the character in input direction.</summary>
     public Vector3 GetCarrotWorld() => carrotWorld;
+
+    /// <summary>Desired input direction on XZ (unit length when valid).</summary>
+    public Vector3 GetWorldDir() => worldDir;
+
+    /// <summary>Current world velocity (forward-only, may be zero).</summary>
     public Vector3 GetVelocity() => velocity;
+
+    public float GetCurrentSpeed() => currentSpeed;
+
+    /// <summary>Signed angular velocity (deg/s) applied to the body.</summary>
+    public float GetAngularVelocityDeg() => currentOmegaDeg;
 }

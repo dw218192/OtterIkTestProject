@@ -1,120 +1,119 @@
+// HeadIKGuideFromArrow.cs
 using UnityEngine;
 
 /// <summary>
-/// Creates/updates a Head IK guide transform.
-///
-/// In this "character-centered ring" design:
-/// - MovementController computes a carrotWorld target.
-/// - Head IK guide follows carrotWorld (optionally with extra lead).
-///
-/// This supports "head leads, body follows" later (spine IK / limb IK).
+/// Updates a Head IK guide transform.
+/// - MovementController computes an input-intent "carrotWorld" ahead of the character.
+/// - This script positions the HeadIKGuide at/near that carrot, with optional extra lead.
+/// - When idle (no drag), it keeps a stable forward guide so neck/head can rest naturally.
 /// </summary>
 public class HeadIKGuideFromArrow : MonoBehaviour
 {
     [Header("References")]
     [SerializeField] private MovementController movement;
-    [Tooltip("Optional: head bone/anchor. If null, use movement.transform.")]
-    [SerializeField] private Transform headAnchorOverride;
 
-    [Header("Guide Transform")]
+    [Tooltip("Anchor for the guide (usually a head/neck root or body pivot). If null, uses movement.transform.")]
+    [SerializeField] private Transform anchor;
+
+    [Tooltip("The transform used by IK as the look target.")]
     [SerializeField] private Transform headIKGuide;
 
-    [Header("Plane (Water Surface)")]
+    [Header("Plane")]
     [SerializeField] private bool useFixedPlaneY = true;
     [SerializeField] private float fixedPlaneY = 0f;
 
-    [Header("Behavior")]
-    [Tooltip("Extra lead in world units along anchor->carrot direction (0~0.3 recommended).")]
+    [Header("Idle")]
+    [Tooltip("When not dragging, place guide ahead of anchor by this many world units. Set 0 to disable guide on idle.")]
+    [SerializeField] private float idleForward = 1.2f;
+
+    [Header("Lead")]
+    [Tooltip("Additional lead (world units) added in the carrot direction, on top of carrotWorld.")]
     [SerializeField] private float extraLead = 0.0f;
 
-    [Tooltip("When not dragging, keep guide in front of anchor by this distance. 0 disables guide when idle.")]
-    [SerializeField] private float idleForward = 0.6f;
-
     [Header("Smoothing")]
-    [SerializeField] private float positionLerpSpeed = 18f;
+    [Tooltip("Follow smoothing speed. Higher = snappier. 0 = no smoothing.")]
+    [SerializeField] private float followSpeed = 22f;
+
+    [Tooltip("If true, keep guide movement on XZ plane.")]
+    [SerializeField] private bool planarOnly = true;
 
     [Header("Debug")]
     [SerializeField] private bool drawGizmos = true;
-    [SerializeField] private float gizmoRadius = 0.08f;
+    [SerializeField] private float gizmoRadius = 0.06f;
 
     private float PlaneY
-        => useFixedPlaneY ? fixedPlaneY : (movement != null ? movement.transform.position.y : 0f);
+        => useFixedPlaneY ? fixedPlaneY : (anchor != null ? anchor.position.y : (movement != null ? movement.transform.position.y : 0f));
 
-    private void Awake()
+    private void Awake() => EnsureRefs();
+    private void OnEnable() => EnsureRefs();
+
+    private void LateUpdate()
     {
         EnsureRefs();
-        EnsureGuide();
-    }
-
-    private void Update()
-    {
-        EnsureRefs();
-        EnsureGuide();
         if (movement == null || headIKGuide == null) return;
+        if (anchor == null) anchor = movement.transform;
 
-        Transform anchor = headAnchorOverride != null ? headAnchorOverride : movement.transform;
+        bool dragging = movement.IsDragging();
+        var zone = movement.GetZone();
 
-        if (!movement.IsDragging())
+        // If idle and user wants no idle guide, hide.
+        if (!dragging && idleForward <= 0f)
         {
-            if (idleForward <= 0f)
-            {
-                headIKGuide.gameObject.SetActive(false);
-                return;
-            }
-
-            Vector3 fwd = anchor.forward;
-            fwd.y = 0f;
-            if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
-            fwd.Normalize();
-
-            Vector3 idlePos = anchor.position + fwd * idleForward;
-            idlePos.y = PlaneY;
-
-            headIKGuide.position = SmoothMove(headIKGuide.position, idlePos);
-            headIKGuide.gameObject.SetActive(true);
+            headIKGuide.gameObject.SetActive(false);
             return;
         }
 
-        Vector3 carrot = movement.GetCarrotWorld();
-        Vector3 dir = carrot - anchor.position;
-        dir.y = 0f;
+        Vector3 targetPos;
 
-        Vector3 lead = Vector3.zero;
-        if (dir.sqrMagnitude > 1e-6f)
-            lead = dir.normalized * extraLead;
+        if (!dragging)
+        {
+            // Idle: keep a stable point in front of the body (or last-known facing).
+            Vector3 fwd = movement.transform.forward;
+            if (planarOnly) fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
+            fwd.Normalize();
 
-        Vector3 targetPos = carrot + lead;
-        targetPos.y = PlaneY;
+            targetPos = anchor.position + fwd * idleForward;
+        }
+        else
+        {
+            // Active drag:
+            // Aim zone still drives head direction, but we keep guide position near carrot.
+            Vector3 carrot = movement.GetCarrotWorld();
+            Vector3 dir = carrot - anchor.position;
+            if (planarOnly) dir.y = 0f;
+
+            Vector3 lead = Vector3.zero;
+            if (extraLead > 0f && dir.sqrMagnitude > 1e-6f)
+                lead = dir.normalized * extraLead;
+
+            targetPos = carrot + lead;
+
+            // Optional: in Aim zone you may want the guide a bit closer (tighter head control).
+            // Keeping it as-is is usually fine, because carrotRadiusAim should already be smaller.
+            _ = zone; // (kept to make it easy to add per-zone tweaks later)
+        }
+
+        if (planarOnly) targetPos.y = PlaneY;
 
         headIKGuide.position = SmoothMove(headIKGuide.position, targetPos);
         headIKGuide.gameObject.SetActive(true);
+    }
+
+    private Vector3 SmoothMove(Vector3 current, Vector3 target)
+    {
+        if (followSpeed <= 0f) return target;
+        float dt = Time.deltaTime;
+        float k = 1f - Mathf.Exp(-followSpeed * dt);
+        return Vector3.Lerp(current, target, k);
     }
 
     private void EnsureRefs()
     {
         if (movement == null)
             movement = FindObjectOfType<MovementController>();
-    }
-
-    private void EnsureGuide()
-    {
-        if (headIKGuide != null) return;
-
-        GameObject go = new GameObject("HeadIK_Guide");
-        go.transform.SetParent(transform, worldPositionStays: true);
-
-        Vector3 p = transform.position;
-        p.y = PlaneY;
-        go.transform.position = p;
-
-        headIKGuide = go.transform;
-    }
-
-    private Vector3 SmoothMove(Vector3 current, Vector3 target)
-    {
-        if (!Application.isPlaying || positionLerpSpeed <= 0f) return target;
-        float k = 1f - Mathf.Exp(-positionLerpSpeed * Time.deltaTime);
-        return Vector3.Lerp(current, target, k);
+        if (movement != null && anchor == null)
+            anchor = movement.transform;
     }
 
     private void OnDrawGizmos()

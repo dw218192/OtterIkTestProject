@@ -58,6 +58,19 @@ public class DualRingUIController : MonoBehaviour
 
     private float PlaneY => useFixedPlaneY ? fixedPlaneY : centerWorld.y;
 
+
+
+    private Vector2 _cachedDir;
+    private float _cachedRadius;
+    private bool _hasArrowInput;
+
+    public void SetArrowInput(Vector2 dirScreen, float radiusPx)
+    {
+        _cachedDir = dirScreen;
+        _cachedRadius = radiusPx;
+        _hasArrowInput = true;
+    }
+
     private void Start()
     {
         if (uiCamera == null) uiCamera = Camera.main;
@@ -78,7 +91,7 @@ public class DualRingUIController : MonoBehaviour
         RebuildRingGeometry();
     }
 
-    private void Update()
+    private void LateUpdate()
     {
         if (uiCamera == null) return;
 
@@ -91,6 +104,8 @@ public class DualRingUIController : MonoBehaviour
         RecomputeWorldRadii(force: false);
         UpdateCenterFromTarget();
         ApplyCenter();
+
+        if (_hasArrowInput) UpdateArrowFromScreen(_cachedDir, _cachedRadius);
     }
 
     public Vector3 GetCenterWorldOnPlane() => centerWorld;
