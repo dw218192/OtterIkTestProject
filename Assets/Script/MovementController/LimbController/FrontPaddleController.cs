@@ -1,12 +1,11 @@
 // FrontPaddleController.cs
+// Optimized: outside-of-arc paddling using signed spine curvature (bendSign).
 // Controls ONLY IK target positions (no IK solving here).
-// Uses Gecko-style: angle error -> target angular velocity -> smoothed angular velocity
-// Uses spine curvature (optional) to scale stroke amplitude
-// Visualizes root->target lines.
+// Visualizes spine outside direction and target chasing.
 //
-// Attach this to CHEST (or a stable upper body node).
-// Assign: MovementController, left/right limb ROOT bones, left/right IK Targets,
-// and optionally spine bones (root->tail order).
+// Attach this to CHEST / UpperSpine (stable trunk node).
+// Assign: MovementController, left/right limb roots, left/right IK targets.
+// Optional: spineChain (Chest -> ... -> Tail).
 
 using UnityEngine;
 
@@ -17,18 +16,21 @@ public class FrontPaddleController : MonoBehaviour
 
     [Header("References")]
     [SerializeField] private MovementController movement;
-    [Tooltip("Left front limb root (shoulder / upper arm / thigh root)")]
+
+    [Tooltip("Left front limb root (shoulder/upper limb root)")]
     [SerializeField] private Transform leftLimbRoot;
-    [Tooltip("Right front limb root (shoulder / upper arm / thigh root)")]
+
+    [Tooltip("Right front limb root (shoulder/upper limb root)")]
     [SerializeField] private Transform rightLimbRoot;
 
-    [Tooltip("IK target transform for LEFT limb (the thing your AdvancedTwoBoneIK reads)")]
+    [Tooltip("IK target transform for LEFT limb (read by your AdvancedTwoBoneIK)")]
     [SerializeField] private Transform leftTarget;
+
     [Tooltip("IK target transform for RIGHT limb")]
     [SerializeField] private Transform rightTarget;
 
-    [Header("Spine (optional, root -> tail order)")]
-    [Tooltip("Used only to compute a bend amount (0..1) to scale stroke amplitude.")]
+    [Header("Spine (optional, Chest -> Tail order)")]
+    [Tooltip("Used to compute bend amount + bend SIGN (outside direction). Do NOT include neck/head.")]
     [SerializeField] private Transform[] spineChain;
 
     [Header("Gecko-style Turning Signal")]
@@ -41,10 +43,10 @@ public class FrontPaddleController : MonoBehaviour
     [Tooltip("How fast omega can change (deg/s^2). Bigger = snappier.")]
     [SerializeField] private float omegaAccelDeg = 720f;
 
-    [Tooltip("Ignore tiny turns. Below this omega, we tend to recover/idle.")]
+    [Tooltip("Start paddling when abs(omega) exceeds this (deg/s).")]
     [SerializeField] private float omegaStartThreshold = 35f;
 
-    [Tooltip("Consider turn finished when abs(omega) drops below this.")]
+    [Tooltip("Consider turn finished when abs(omega) drops below this (deg/s).")]
     [SerializeField] private float omegaStopThreshold = 15f;
 
     [Header("Stroke Timing")]
@@ -54,33 +56,45 @@ public class FrontPaddleController : MonoBehaviour
     [Tooltip("Recovery duration back to rest.")]
     [SerializeField] private float recoverTime = 0.20f;
 
-    [Tooltip("When direction flips, wait a tiny moment before allowing the other side to fire (anti-chatter).")]
+    [Tooltip("When turning direction flips, wait briefly before allowing the other side to fire.")]
     [SerializeField] private float flipCooldown = 0.08f;
 
-    [Header("Amplitude / Pose")]
-    [Tooltip("Target rest position in CHEST local space (Left). If empty, captured at Start.")]
+    [Header("Amplitude / Pose (Chest local space)")]
+    [Tooltip("Target rest position in CHEST local space (Left). If zero and Auto Capture is on, captured at Start/OnEnable.")]
     [SerializeField] private Vector3 leftRestLocal;
-    [Tooltip("Target rest position in CHEST local space (Right). If empty, captured at Start.")]
+
+    [Tooltip("Target rest position in CHEST local space (Right). If zero and Auto Capture is on, captured at Start/OnEnable.")]
     [SerializeField] private Vector3 rightRestLocal;
 
-    [Tooltip("Local-space offset at full stroke strength (Left). Typically outward + a bit backward/down.")]
-    [SerializeField] private Vector3 leftStrokeOffsetLocal = new Vector3(-0.18f, -0.05f, -0.10f);
+    [Tooltip("Auto capture restLocal from current target positions at Start/OnEnable.")]
+    [SerializeField] private bool autoCaptureRestOnStart = true;
 
-    [Tooltip("Local-space offset at full stroke strength (Right). Typically outward + a bit backward/down.")]
-    [SerializeField] private Vector3 rightStrokeOffsetLocal = new Vector3(+0.18f, -0.05f, -0.10f);
+    [Header("Stroke Offsets")]
+    [Tooltip("If TRUE: lateral direction comes from spine outside (world) => robust to axis mirroring. Recommended.")]
+    [SerializeField] private bool useWorldOutsideOffset = true;
 
-    [Tooltip("Optional extra lift/open when turning strongly (applied along local +Y).")]
+    [Tooltip("How far to push to the OUTSIDE (meters) at full stroke.")]
+    [SerializeField] private float lateralOutAtFull = 0.18f;
+
+    [Tooltip("How far to sweep backward (meters) at full stroke.")]
+    [SerializeField] private float backwardAtFull = 0.10f;
+
+    [Tooltip("How much to press downward (meters) at full stroke.")]
+    [SerializeField] private float downwardAtFull = 0.05f;
+
+    [Tooltip("Optional extra lift/open when turning strongly (meters along chest +Y).")]
     [SerializeField] private float extraLiftAtFull = 0.03f;
 
-    [Header("Strength Mixing")]
-    [Tooltip("How much turn strength contributes (0..1).")]
-    [Range(0, 1)] [SerializeField] private float turnStrengthWeight = 1.0f;
+    [Tooltip("Fallback LOCAL offsets (used only when useWorldOutsideOffset = false).")]
+    [SerializeField] private Vector3 leftStrokeOffsetLocal = new Vector3(-0.18f, -0.05f, -0.10f);
+    [SerializeField] private Vector3 rightStrokeOffsetLocal = new Vector3(+0.18f, -0.05f, -0.10f);
 
-    [Tooltip("How much spine bend contributes (0..1).")]
+    [Header("Strength Mixing")]
+    [Range(0, 1)] [SerializeField] private float turnStrengthWeight = 1.0f;
     [Range(0, 1)] [SerializeField] private float bendStrengthWeight = 0.6f;
 
-    [Tooltip("Normalize bend: bend amount that counts as 'full'.")]
-    [SerializeField] private float bendForFull = 25f; // degrees
+    [Tooltip("Normalize bend: absolute bend degrees that counts as 'full'.")]
+    [SerializeField] private float bendForFullDeg = 25f;
 
     [Header("Smoothing")]
     [Tooltip("How quickly targets move toward desired pos.")]
@@ -89,35 +103,47 @@ public class FrontPaddleController : MonoBehaviour
     [Header("Debug / Gizmos")]
     [SerializeField] private bool drawGizmos = true;
     [SerializeField] private float gizmoSphereRadius = 0.03f;
+    [SerializeField] private float gizmoArrowLen = 0.35f;
 
-    // internal
-    private float omegaDeg;               // smoothed angular velocity (deg/s), signed
+    // Internal signals
+    private float omegaDeg;                 // smoothed signed deg/s
     private float flipCooldownTimer;
 
+    // Bend signals
+    private float bendAbs01;                // 0..1
+    private float bendSignedDeg;            // signed accumulated degrees
+    private int bendSign;                   // -1/0/+1
+
+    // State
     private PaddleState leftState = PaddleState.Idle;
     private PaddleState rightState = PaddleState.Idle;
     private float leftStateTime, rightStateTime;
-
-    private float leftStrokeStrength;     // 0..1
-    private float rightStrokeStrength;    // 0..1
+    private float leftStrokeStrength, rightStrokeStrength;
 
     private bool restCaptured;
 
-    void Start()
-    {
-        CaptureRestIfNeeded();
-    }
+    void Start() => CaptureRestIfNeeded();
+    void OnEnable() => CaptureRestIfNeeded();
 
-    void OnEnable()
+
+    private void ForceIdle(
+        ref PaddleState state,
+        ref float stateTime,
+        ref float strokeStrength)
     {
-        CaptureRestIfNeeded();
+        state = PaddleState.Idle;
+        stateTime = 0f;
+        strokeStrength = 0f;
     }
 
     private void CaptureRestIfNeeded()
     {
         if (restCaptured) return;
-        if (leftTarget != null) leftRestLocal = transform.InverseTransformPoint(leftTarget.position);
+        if (!autoCaptureRestOnStart) { restCaptured = true; return; }
+
+        if (leftTarget != null)  leftRestLocal  = transform.InverseTransformPoint(leftTarget.position);
         if (rightTarget != null) rightRestLocal = transform.InverseTransformPoint(rightTarget.position);
+
         restCaptured = true;
     }
 
@@ -135,124 +161,132 @@ public class FrontPaddleController : MonoBehaviour
 
         if (toCarrot.sqrMagnitude < 1e-6f)
         {
-            // No meaningful aim direction: decay and recover
             omegaDeg = Mathf.MoveTowards(omegaDeg, 0f, omegaAccelDeg * dt);
-            TickStateMachine(dt, 0f, 0f);
+            ComputeBendSignals();
+            TickStateMachine(dt, omegaDeg, 0f);
             ApplyTargets(dt);
             return;
         }
 
         Vector3 desiredDir = toCarrot.normalized;
 
-        // Current forward on XZ plane
-        Vector3 fwd = transform.forward;
-        fwd.y = 0f;
+        // Current forward on XZ
+        Vector3 fwd = transform.forward; fwd.y = 0f;
         if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
         fwd.Normalize();
 
-        // Signed angle error (deg), positive means desired is to the right (Unity SignedAngle with up=Y)
-        float angleError = Vector3.SignedAngle(fwd, desiredDir, Vector3.up);
+        float angleError = Vector3.SignedAngle(fwd, desiredDir, Vector3.up); // deg, signed
 
-        // 2) Gecko-style target omega mapping + smoothing
+        // 2) Gecko-style omega mapping + smoothing
         float turnStrength01 = Mathf.Clamp01(Mathf.Abs(angleError) / Mathf.Max(1f, angleForFullOmega));
         float targetOmega = Mathf.Sign(angleError) * (turnStrength01 * maxTurnOmegaDeg);
-
         omegaDeg = Mathf.MoveTowards(omegaDeg, targetOmega, omegaAccelDeg * dt);
 
-        // 3) Spine bend amount (optional) -> 0..1
-        float bend01 = ComputeBend01();
+        // 3) Spine bend signals (abs + sign)
+        ComputeBendSignals();
 
-        // mix strengths (stable)
-        float mixedStrength = Mathf.Clamp01(turnStrengthWeight * turnStrength01 + bendStrengthWeight * bend01);
+        // 4) Mix strength (abs)
+        float mixedStrength = Mathf.Clamp01(turnStrengthWeight * turnStrength01 + bendStrengthWeight * bendAbs01);
 
         TickStateMachine(dt, omegaDeg, mixedStrength);
         ApplyTargets(dt);
     }
 
-    private float ComputeBend01()
+    // Computes:
+    // - bendAbs01: magnitude 0..1
+    // - bendSignedDeg: signed degrees (accum)
+    // - bendSign: -1/0/+1
+    private void ComputeBendSignals()
     {
-        if (spineChain == null || spineChain.Length < 2) return 0f;
+        bendAbs01 = 0f;
+        bendSignedDeg = 0f;
+        bendSign = 0;
 
-        // We measure how much the chain "yaws" along the path relative to the first bone forward.
-        // Project to XZ and accumulate abs signed angles between successive segments.
-        Vector3 baseFwd = spineChain[0].forward;
-        baseFwd.y = 0f;
-        if (baseFwd.sqrMagnitude < 1e-6f) return 0f;
-        baseFwd.Normalize();
+        if (spineChain == null || spineChain.Length < 2)
+            return;
+
+        Vector3 prev = spineChain[0].forward;
+        prev.y = 0f;
+        if (prev.sqrMagnitude < 1e-6f) return;
+        prev.Normalize();
 
         float accumAbs = 0f;
-        Vector3 prevFwd = baseFwd;
+        float accumSigned = 0f;
 
         for (int i = 1; i < spineChain.Length; i++)
         {
-            Vector3 fwd = spineChain[i].forward;
-            fwd.y = 0f;
-            if (fwd.sqrMagnitude < 1e-6f) continue;
-            fwd.Normalize();
+            Vector3 cur = spineChain[i].forward;
+            cur.y = 0f;
+            if (cur.sqrMagnitude < 1e-6f) continue;
+            cur.Normalize();
 
-            float a = Vector3.SignedAngle(prevFwd, fwd, Vector3.up);
+            float a = Vector3.SignedAngle(prev, cur, Vector3.up);
+            accumSigned += a;
             accumAbs += Mathf.Abs(a);
-            prevFwd = fwd;
+
+            prev = cur;
         }
 
-        // Normalize: bendForFull degrees -> 1
-        return Mathf.Clamp01(accumAbs / Mathf.Max(1f, bendForFull));
+        bendSignedDeg = accumSigned;
+        bendSign = Mathf.Abs(accumSigned) < 0.01f ? 0 : (accumSigned > 0f ? +1 : -1);
+        bendAbs01 = Mathf.Clamp01(accumAbs / Mathf.Max(1f, bendForFullDeg));
     }
 
     private void TickStateMachine(float dt, float omegaSigned, float strength01)
     {
-        // Anti-chatter on sign flip
         if (flipCooldownTimer > 0f)
             flipCooldownTimer -= dt;
 
-        int sign = (Mathf.Abs(omegaSigned) < 1e-3f) ? 0 : (omegaSigned > 0f ? +1 : -1);
+        float omegaAbs = Mathf.Abs(omegaSigned);
+        bool needStroke = omegaAbs >= omegaStartThreshold;
 
-        // We interpret:
-        // sign > 0 => turning right => RIGHT limb strokes (acts like a rudder/paddle)
-        // sign < 0 => turning left  => LEFT limb strokes
-        bool wantRight = (sign > 0 && Mathf.Abs(omegaSigned) >= omegaStartThreshold);
-        bool wantLeft  = (sign < 0 && Mathf.Abs(omegaSigned) >= omegaStartThreshold);
+        // Decide which side is OUTSIDE:
+        // Use bendSign if available; fallback to omega sign if spineChain is missing or too small.
+        int outsideSign = bendSign != 0 ? bendSign : (omegaSigned > 0f ? +1 : (omegaSigned < 0f ? -1 : 0));
 
-        // If direction flips while stroking -> immediate break + recover
+        // Convention:
+        // outsideSign > 0 => outside is "to the right of base forward"
+        // => RIGHT limb strokes (acts as outside paddle)
+        // If your rig feels reversed, flip this mapping by swapping wantRight/wantLeft below.
+        bool wantRight = needStroke && outsideSign > 0 && flipCooldownTimer <= 0f;
+        bool wantLeft  = needStroke && outsideSign < 0 && flipCooldownTimer <= 0f;
+
+
+        // =========================
+        // STRONG RUDDER MODE (mutual exclusion)
+        // Only one side can be active at any time
+        // =========================
+        if (wantLeft)
+        {
+            // Left wants to stroke → kill right immediately
+            ForceIdle(ref rightState, ref rightStateTime, ref rightStrokeStrength);
+        }
+        else if (wantRight)
+        {
+            // Right wants to stroke → kill left immediately
+            ForceIdle(ref leftState, ref leftStateTime, ref leftStrokeStrength);
+        }
+        // Flip handling: if currently stroking and outside side changes, force recover and cooldown.
         bool leftActive = (leftState == PaddleState.ExtendHold);
         bool rightActive = (rightState == PaddleState.ExtendHold);
 
-        if (leftActive && sign > 0)
+        if (leftActive && wantRight)
         {
-            // flipped to right
             leftState = PaddleState.Recover;
             leftStateTime = 0f;
             flipCooldownTimer = flipCooldown;
         }
-        if (rightActive && sign < 0)
+
+        if (rightActive && wantLeft)
         {
-            // flipped to left
             rightState = PaddleState.Recover;
             rightStateTime = 0f;
             flipCooldownTimer = flipCooldown;
         }
 
-        // LEFT state
-        StepOneSide(
-            dt,
-            want: wantLeft && flipCooldownTimer <= 0f,
-            omegaAbs: Mathf.Abs(omegaSigned),
-            strength01: strength01,
-            ref leftState,
-            ref leftStateTime,
-            ref leftStrokeStrength
-        );
-
-        // RIGHT state
-        StepOneSide(
-            dt,
-            want: wantRight && flipCooldownTimer <= 0f,
-            omegaAbs: Mathf.Abs(omegaSigned),
-            strength01: strength01,
-            ref rightState,
-            ref rightStateTime,
-            ref rightStrokeStrength
-        );
+        // Update each side
+        StepOneSide(dt, wantLeft,  omegaAbs, strength01, ref leftState,  ref leftStateTime,  ref leftStrokeStrength);
+        StepOneSide(dt, wantRight, omegaAbs, strength01, ref rightState, ref rightStateTime, ref rightStrokeStrength);
     }
 
     private void StepOneSide(
@@ -270,7 +304,6 @@ public class FrontPaddleController : MonoBehaviour
         switch (state)
         {
             case PaddleState.Idle:
-            {
                 strokeStrength = 0f;
                 if (want)
                 {
@@ -279,11 +312,8 @@ public class FrontPaddleController : MonoBehaviour
                     strokeStrength = Mathf.Clamp01(strength01);
                 }
                 break;
-            }
 
             case PaddleState.ExtendHold:
-            {
-                // Same-side continuous turning: keep extending (allow longer) while omega is still meaningful
                 strokeStrength = Mathf.Max(strokeStrength, Mathf.Clamp01(strength01));
 
                 bool finishedTurn = omegaAbs <= omegaStopThreshold;
@@ -295,11 +325,8 @@ public class FrontPaddleController : MonoBehaviour
                     stateTime = 0f;
                 }
                 break;
-            }
 
             case PaddleState.Recover:
-            {
-                // Decay back to rest smoothly
                 float t = Mathf.Clamp01(stateTime / Mathf.Max(0.01f, recoverTime));
                 strokeStrength = Mathf.Lerp(strokeStrength, 0f, t);
 
@@ -310,24 +337,58 @@ public class FrontPaddleController : MonoBehaviour
                     stateTime = 0f;
                 }
                 break;
-            }
         }
     }
 
     private void ApplyTargets(float dt)
     {
-        // Left desired local position
-        Vector3 leftLocal = leftRestLocal + leftStrokeOffsetLocal * leftStrokeStrength;
-        leftLocal.y += extraLiftAtFull * leftStrokeStrength;
+        // Desired positions in Chest local space
+        Vector3 leftLocalDesired = leftRestLocal;
+        Vector3 rightLocalDesired = rightRestLocal;
 
-        // Right desired local position
-        Vector3 rightLocal = rightRestLocal + rightStrokeOffsetLocal * rightStrokeStrength;
-        rightLocal.y += extraLiftAtFull * rightStrokeStrength;
+        if (useWorldOutsideOffset)
+        {
+            // Build offset in WORLD using outside direction, then convert to Chest local.
+            Vector3 baseFwd = transform.forward;
+            baseFwd.y = 0f;
+            if (baseFwd.sqrMagnitude < 1e-6f) baseFwd = Vector3.forward;
+            baseFwd.Normalize();
 
-        Vector3 leftWorldDesired = transform.TransformPoint(leftLocal);
-        Vector3 rightWorldDesired = transform.TransformPoint(rightLocal);
+            // outside direction (world): right of baseFwd times outsideSign (bendSign preferred)
+            int outsideSign = bendSign != 0 ? bendSign : (omegaDeg > 0f ? +1 : (omegaDeg < 0f ? -1 : 0));
+            Vector3 outsideWorld = Vector3.Cross(Vector3.up, baseFwd).normalized * outsideSign;
 
-        float a = 1f - Mathf.Exp(-targetLerpSpeed * dt); // framerate-independent smoothing
+            // World stroke vector
+            Vector3 strokeWorld =
+                outsideWorld * lateralOutAtFull
+                + (-baseFwd) * backwardAtFull
+                + (-Vector3.up) * downwardAtFull;
+
+            // Convert to chest local as a direction (NOT point)
+            Vector3 strokeLocal = transform.InverseTransformDirection(strokeWorld);
+
+            leftLocalDesired += strokeLocal * leftStrokeStrength;
+            rightLocalDesired += strokeLocal * rightStrokeStrength;
+
+            leftLocalDesired.y += extraLiftAtFull * leftStrokeStrength;
+            rightLocalDesired.y += extraLiftAtFull * rightStrokeStrength;
+        }
+        else
+        {
+            leftLocalDesired += leftStrokeOffsetLocal * leftStrokeStrength;
+            rightLocalDesired += rightStrokeOffsetLocal * rightStrokeStrength;
+
+            leftLocalDesired.y += extraLiftAtFull * leftStrokeStrength;
+            rightLocalDesired.y += extraLiftAtFull * rightStrokeStrength;
+        }
+
+        // Transform to world
+        Vector3 leftWorldDesired = transform.TransformPoint(leftLocalDesired);
+        Vector3 rightWorldDesired = transform.TransformPoint(rightLocalDesired);
+
+        // Smooth chase (framerate independent)
+        float a = 1f - Mathf.Exp(-targetLerpSpeed * Mathf.Max(Time.deltaTime, 1e-5f));
+
         leftTarget.position = Vector3.Lerp(leftTarget.position, leftWorldDesired, a);
         rightTarget.position = Vector3.Lerp(rightTarget.position, rightWorldDesired, a);
     }
@@ -336,7 +397,7 @@ public class FrontPaddleController : MonoBehaviour
     {
         if (!drawGizmos) return;
 
-        // Roots -> Targets
+        // Limb roots -> targets
         if (leftLimbRoot != null && leftTarget != null)
         {
             Gizmos.DrawLine(leftLimbRoot.position, leftTarget.position);
@@ -347,6 +408,38 @@ public class FrontPaddleController : MonoBehaviour
         {
             Gizmos.DrawLine(rightLimbRoot.position, rightTarget.position);
             Gizmos.DrawWireSphere(rightTarget.position, gizmoSphereRadius);
+        }
+
+        // Debug: draw base forward and outside normal (if spine exists)
+        Vector3 origin = transform.position;
+
+        Vector3 baseFwd = transform.forward;
+        baseFwd.y = 0f;
+        if (baseFwd.sqrMagnitude < 1e-6f) baseFwd = Vector3.forward;
+        baseFwd.Normalize();
+
+        // base forward arrow
+        Gizmos.DrawLine(origin, origin + baseFwd * gizmoArrowLen);
+
+        // outside arrow uses bendSign if possible
+        int outsideSign = bendSign;
+        if (outsideSign == 0)
+        {
+            // fallback on omega direction in edit mode (omegaDeg not updated)
+            outsideSign = 1;
+        }
+
+        Vector3 outside = Vector3.Cross(Vector3.up, baseFwd).normalized * outsideSign;
+        Gizmos.DrawLine(origin, origin + outside * (gizmoArrowLen * 0.8f));
+
+        // Spine chain lines
+        if (spineChain != null && spineChain.Length >= 2)
+        {
+            for (int i = 0; i < spineChain.Length - 1; i++)
+            {
+                if (spineChain[i] == null || spineChain[i + 1] == null) continue;
+                Gizmos.DrawLine(spineChain[i].position, spineChain[i + 1].position);
+            }
         }
     }
 }
