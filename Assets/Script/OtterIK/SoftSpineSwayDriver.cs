@@ -126,11 +126,11 @@ public class SoftSpineSwayDriver : MonoBehaviour
 
         float dt = Time.deltaTime;
         if (dt <= 0f) return;
-        Debug.Log($"SoftSpine tick. movement={(movement?movement.name:"NULL")} bones={(bones==null? -1 : bones.Length)}");
+        //Debug.Log($"SoftSpine tick. movement={(movement?movement.name:"NULL")} bones={(bones==null? -1 : bones.Length)}");
 
         // Body angular velocity (deg/s), signed around up.
         float omega = movement.GetAngularVelocityDeg();
-        Debug.Log($"omega={omega}");
+        //Debug.Log($"omega={omega}");
 
         // push into delay buffer
         _omegaDelay[_omegaDelayHead] = omega;
@@ -225,7 +225,7 @@ public class SoftSpineSwayDriver : MonoBehaviour
             }
 
             b.bone.localRotation = _bindLocal[i] * delta;
-            if(i==n-1) Debug.Log($"writing tail tip, a={a} targetYaw={targetYaw}");
+            //if(i==n-1) Debug.Log($"writing tail tip, a={a} targetYaw={targetYaw}");
         }
     }
 
