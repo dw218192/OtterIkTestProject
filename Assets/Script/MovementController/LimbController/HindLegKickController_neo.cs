@@ -3,27 +3,30 @@ using UnityEngine;
 /// <summary>
 /// Hind-leg kick controller (no Rigidbody).
 ///
-/// Key design:
-/// - This script ONLY moves IK targets. Bone motion comes from your IK rig.
+/// Core ideas:
+/// - This script ONLY moves IK target transforms.
 /// - Kick trigger uses point acceleration at hip: v_used = v_root + (omega x r) [Scheme B].
-/// - Inner/Outer leg direction is defined relative to the SPINE CURVE at hip:
-///     - tangentXZ: spine curve tangent (XZ).
-///     - sideXZ: normal to tangent on XZ (right side of tangent).
-///     - turnSign: sign of turning direction (recommended from omegaY for stability).
-///     - legSideSign: which side of sideXZ the leg root is on.
-///     - innerLeg: legSideSign == turnSign
-///     - outerLeg: legSideSign != turnSign
+/// - Inner/Outer leg direction is defined relative to the SPINE CURVE tangent at hip on XZ:
+///     tangentXZ: spine curve tangent (XZ)
+///     sideXZ   : right-side normal to tangent on XZ (Vector3.Cross(up, tangent))
+///     turnSign : sign of turning direction (recommended from omegaY for stability)
+///     legSideSign: which side of sideXZ the leg root is on
+///     innerLeg : legSideSign == turnSign
+///     outerLeg : legSideSign != turnSign
 ///
-/// Inner/Outer can have DIFFERENT magnitudes:
-/// - outerTangentAngleOffsetDeg / innerTangentAngleOffsetDeg
-/// - outerLateralOffsetMeters   / innerLateralOffsetMeters
-///
-/// Gizmo:
-/// - Preview marker sphere on the trajectory at gizmoPreviewPhase01 (0..1). Phase=0 is REST.
+/// Refinements included:
+/// - Cooldown starts AFTER kick finishes.
+/// - When root has meaningful translation -> shared cooldown (both legs start together).
+/// - When rotating in place -> per-leg cooldown (each leg independent).
+/// - Keep angular contribution for in-place turns, and smooth usedVel before differentiating.
+/// - Direction & amplitude shaping:
+///     (1) Inner leg can steer toward spine-curve INNER normal when turning without forward motion.
+///     (2) Backward-stroke (negative local Z) is reduced when forward demand is low.
+///     (3) Side stroke is boosted with turning demand; inner leg can get extra side boost + extra back reduction.
 /// </summary>
 [ExecuteAlways]
 [DefaultExecutionOrder(250)]
-public class HindLegKickController : MonoBehaviour
+public class HindLegKickControllerNeo : MonoBehaviour
 {
     [System.Serializable]
     public class Leg
@@ -51,9 +54,9 @@ public class HindLegKickController : MonoBehaviour
         // Runtime
         [HideInInspector] public bool pendingKick;
         [HideInInspector] public float delayTimer;
+        [HideInInspector] public bool cachedIsInner;
         [HideInInspector] public float phase01;
         [HideInInspector] public float strength01;
-
         [HideInInspector] public bool restInitialized;
     }
 
@@ -63,6 +66,25 @@ public class HindLegKickController : MonoBehaviour
     [Header("Space / Spine")]
     public Transform rootSpace;
     public Transform[] spineChain;
+
+    
+
+    [Header("Spine tangent conventions")]
+    [Tooltip("If your spineChain is ordered tail->head (or otherwise produces a tangent pointing backward), enable this to flip the computed tangent (fixes 180° kick direction and inner/outer swap).")]
+    public bool invertSpineTangent = false;
+
+    [Tooltip("If inner/outer still feels swapped when using omegaY as turn sign, enable to invert omega-derived turning sign.")]
+    public bool invertOmegaTurnSign = false;
+[Header("Cooldown mode")]
+    [Tooltip("When true, both legs share one cooldown timer while the root has meaningful TRANSLATION. If the root is only rotating in place, legs cool down independently.")]
+    public bool shareCooldownWhenTranslating = true;
+
+    [Tooltip("Translation speed threshold (m/s) above which we treat the root as 'translating' and use the shared cooldown.")]
+    public float translateSpeedForSharedCooldown = 0.05f;
+
+    [Header("Trigger signal smoothing")]
+    [Tooltip("Time constant (seconds) for smoothing usedVel BEFORE taking the derivative. Higher = less noisy accel trigger.")]
+    public float usedVelSmoothingTau = 0.12f;
 
     [Header("Angular motion trigger (Scheme B)")]
     [Tooltip("If true, use v_point = v_root + (omega x r) to trigger kicks (handles root rotation without translation).")]
@@ -101,6 +123,8 @@ public class HindLegKickController : MonoBehaviour
     [Header("Kick trigger (acceleration)")]
     public float accelTrigger = 0.8f;
     public float accelForFullStrength = 4.0f;
+
+    [Tooltip("Minimum interval (seconds) between kicks. Applied to shared cooldown OR per-leg cooldown depending on mode.")]
     public float minKickInterval = 0.25f;
 
     [Header("Kick timing")]
@@ -139,6 +163,40 @@ public class HindLegKickController : MonoBehaviour
     [Tooltip("Lateral offset along the leg secondary axis for INNER leg (meters).")]
     [Range(0f, 0.5f)]
     public float innerLateralOffsetMeters = 0.02f;
+
+    [Header("Kick direction & demand-based amplitude")]
+    [Tooltip("Inner leg can steer toward the spine-curve INNER normal when turning without forward motion.")]
+    [Range(0f, 1f)]
+    public float innerNormalSteerStrength01 = 0.75f;
+
+    [Tooltip("OmegaY (rad/s) deadzone for turning detection / demand mapping.")]
+    public float omegaYawDeadzone = 0.15f;
+
+    [Tooltip("OmegaY magnitude (rad/s) for full turning demand.")]
+    public float omegaYawForFullDemand = 2.4f;
+
+    [Tooltip("Forward speed (m/s along rootSpace forward) for full backward-stroke amplitude.")]
+    public float forwardSpeedForFullBackStroke = 0.35f;
+
+    [Tooltip("Minimum scale applied to backward (negative Z) stroke when there is no forward demand.")]
+    [Range(0f, 1f)]
+    public float minBackStrokeScaleNoForward = 0.18f;
+
+    [Tooltip("Side stroke scale when not turning.")]
+    [Range(0f, 1f)]
+    public float sideScaleAtNoTurn = 0.25f;
+
+    [Tooltip("Side stroke scale at full turning demand.")]
+    [Range(0f, 2f)]
+    public float sideScaleAtFullTurn = 1.0f;
+
+    [Tooltip("Extra multiplier for side stroke on INNER leg during turning.")]
+    [Range(0.5f, 2f)]
+    public float innerSideBoost = 1.25f;
+
+    [Tooltip("Extra multiplier applied to backward stroke on INNER leg during turning (usually < 1).")]
+    [Range(0f, 1f)]
+    public float innerBackStrokeMultiplier = 0.65f;
 
     [Header("Turn amount mapping (strength of inner/outer separation)")]
     [Tooltip("Bend angle (degrees) at which turnAmount01 reaches 1. Smaller = stronger response.")]
@@ -180,10 +238,22 @@ public class HindLegKickController : MonoBehaviour
     // Runtime caches
     private Quaternion _prevRootRot;
     private Vector3 _prevUsedVel;
-    private float _sinceLastKick = 999f;
 
-    // We also cache omegaY each frame for turnSign usage (when useOmegaYawForTurnSign=true).
+    // Cooldown timers (seconds since last kick FINISHED)
+    private float _sinceLastKickShared = 999f;
+    private float _sinceLastKickLeft = 999f;
+    private float _sinceLastKickRight = 999f;
+    private bool _sharedKickInProgress;
+
+    // Smoothed trigger signal
+    private Vector3 _smoothedUsedVel;
+
+    // Cached for turnSign usage.
     private float _lastOmegaY;
+
+    // Cached for demand mapping
+    private Vector3 _usedVelLocal;
+    private float _turnDemand01;
 
     private void Reset()
     {
@@ -200,9 +270,38 @@ public class HindLegKickController : MonoBehaviour
 
         _prevRootRot = GetRootRotation();
         _prevUsedVel = Vector3.zero;
+        _smoothedUsedVel = Vector3.zero;
         _lastOmegaY = 0f;
+        _usedVelLocal = Vector3.zero;
+        _turnDemand01 = 0f;
+
+        _sinceLastKickShared = 999f;
+        _sinceLastKickLeft = 999f;
+        _sinceLastKickRight = 999f;
+        _sharedKickInProgress = false;
 
         SyncRestIfNeeded(force: false);
+    }
+
+    private void Start()
+    {
+        if (rootSpace == null) rootSpace = transform;
+        if (hipTransform == null) hipTransform = transform;
+
+        ForceInitRest(leftLeg);
+        ForceInitRest(rightLeg);
+
+        _prevRootRot = GetRootRotation();
+        _prevUsedVel = Vector3.zero;
+        _smoothedUsedVel = Vector3.zero;
+        _lastOmegaY = 0f;
+        _usedVelLocal = Vector3.zero;
+        _turnDemand01 = 0f;
+
+        _sinceLastKickShared = 999f;
+        _sinceLastKickLeft = 999f;
+        _sinceLastKickRight = 999f;
+        _sharedKickInProgress = false;
     }
 
     private void OnValidate()
@@ -220,8 +319,7 @@ public class HindLegKickController : MonoBehaviour
 
     private void SyncLegRest(Leg leg, bool force)
     {
-        if (leg == null) return;
-        if (rootSpace == null || leg.ikTarget == null) return;
+        if (leg == null || rootSpace == null || leg.ikTarget == null) return;
 
         if (!Application.isPlaying)
         {
@@ -229,19 +327,6 @@ public class HindLegKickController : MonoBehaviour
             leg.restLocalPos = rootSpace.InverseTransformPoint(leg.ikTarget.position);
             leg.restInitialized = true;
         }
-    }
-
-    private void Start()
-    {
-        if (rootSpace == null) rootSpace = transform;
-        if (hipTransform == null) hipTransform = transform;
-
-        ForceInitRest(leftLeg);
-        ForceInitRest(rightLeg);
-
-        _prevRootRot = GetRootRotation();
-        _prevUsedVel = Vector3.zero;
-        _lastOmegaY = 0f;
     }
 
     private void ForceInitRest(Leg leg)
@@ -262,38 +347,90 @@ public class HindLegKickController : MonoBehaviour
         if (rootSpace == null) return;
 
         float dt = Time.deltaTime;
-        _sinceLastKick += dt;
 
-        // Build the velocity used for triggering kicks (Scheme B).
-        Vector3 usedVel = ComputeUsedVelocityAndOmegaY(dt, out float omegaY);
+        // Translating -> shared cooldown; rotating in place -> independent cooldown.
+        bool useSharedCooldown = shareCooldownWhenTranslating &&
+                                 movement != null &&
+                                 movement.GetVelocity().sqrMagnitude >= (translateSpeedForSharedCooldown * translateSpeedForSharedCooldown);
 
-        // Cache omegaY for inner/outer SIGN if desired.
+        // Tick cooldown timers (cooldown starts AFTER kick finishes).
+        if (useSharedCooldown)
+        {
+            if (!_sharedKickInProgress) _sinceLastKickShared += dt;
+        }
+        else
+        {
+            if (!leftLeg.pendingKick) _sinceLastKickLeft += dt;
+            if (!rightLeg.pendingKick) _sinceLastKickRight += dt;
+        }
+
+        // Build used velocity for triggering kicks (Scheme B).
+        Vector3 usedVelRaw = ComputeUsedVelocityAndOmegaY(dt, out float omegaY);
         _lastOmegaY = omegaY;
 
-        float usedSpeed = usedVel.magnitude;
+        // Smooth usedVel before taking derivative (reduces accel spikes from omega/dt noise).
+        if (usedVelSmoothingTau <= 1e-5f)
+        {
+            _smoothedUsedVel = usedVelRaw;
+        }
+        else
+        {
+            float a = 1f - Mathf.Exp(-dt / usedVelSmoothingTau);
+            _smoothedUsedVel = Vector3.Lerp(_smoothedUsedVel, usedVelRaw, a);
+        }
+
+        // Demand mapping in root local space
+        _usedVelLocal = rootSpace.InverseTransformDirection(_smoothedUsedVel);
+        float omegaAbs = Mathf.Abs(_lastOmegaY);
+        _turnDemand01 = (omegaAbs <= omegaYawDeadzone)
+            ? 0f
+            : Mathf.Clamp01((omegaAbs - omegaYawDeadzone) / Mathf.Max(omegaYawForFullDemand - omegaYawDeadzone, 1e-4f));
+
+        float usedSpeed = _smoothedUsedVel.magnitude;
 
         if (usedSpeed < minSpeedToAnimate && !leftLeg.pendingKick && !rightLeg.pendingKick)
         {
             ReturnToRest(leftLeg, dt);
             ReturnToRest(rightLeg, dt);
-            _prevUsedVel = usedVel;
+            _prevUsedVel = _smoothedUsedVel;
             return;
         }
 
-        Vector3 usedAccel = (usedVel - _prevUsedVel) / Mathf.Max(dt, 1e-5f);
-        _prevUsedVel = usedVel;
+        Vector3 usedAccel = (_smoothedUsedVel - _prevUsedVel) / Mathf.Max(dt, 1e-5f);
+        _prevUsedVel = _smoothedUsedVel;
 
         float accelMag = usedAccel.magnitude;
 
-        if (_sinceLastKick >= minKickInterval && accelMag >= accelTrigger)
+        if (accelMag >= accelTrigger)
         {
             float strength01 = Mathf.Clamp01(Mathf.InverseLerp(accelTrigger, accelForFullStrength, accelMag));
-            TriggerKick(strength01);
-            _sinceLastKick = 0f;
+
+            if (useSharedCooldown)
+            {
+                if (!_sharedKickInProgress && _sinceLastKickShared >= minKickInterval)
+                {
+                    TriggerKick(strength01);
+                    _sharedKickInProgress = true; // cooldown restarts when BOTH legs finish
+                }
+            }
+            else
+            {
+                if (!leftLeg.pendingKick && _sinceLastKickLeft >= minKickInterval)
+                    ArmLeg(leftLeg, strength01);
+
+                if (!rightLeg.pendingKick && _sinceLastKickRight >= minKickInterval)
+                    ArmLeg(rightLeg, strength01);
+            }
         }
 
         UpdateLeg(leftLeg, dt);
         UpdateLeg(rightLeg, dt);
+
+        if (useSharedCooldown && _sharedKickInProgress && !leftLeg.pendingKick && !rightLeg.pendingKick)
+        {
+            _sinceLastKickShared = 0f;
+            _sharedKickInProgress = false;
+        }
     }
 
     private Vector3 ComputeUsedVelocityAndOmegaY(float dt, out float omegaY)
@@ -326,9 +463,7 @@ public class HindLegKickController : MonoBehaviour
         Vector3 omega = axisWorld.normalized * (angleRad / Mathf.Max(dt, 1e-5f)); // rad/s
 
         if (useYawOnlyForAngularMotion)
-        {
             omega = Vector3.Project(omega, Vector3.up);
-        }
 
         omegaY = omega.y;
 
@@ -345,7 +480,7 @@ public class HindLegKickController : MonoBehaviour
 
     private void ReturnToRest(Leg leg, float dt)
     {
-        if (leg == null || leg.ikTarget == null) return;
+        if (leg == null || leg.ikTarget == null || rootSpace == null) return;
         Vector3 restWorld = rootSpace.TransformPoint(leg.restLocalPos);
         leg.ikTarget.position = Vector3.Lerp(leg.ikTarget.position, restWorld, 1f - Mathf.Exp(-targetPosLerp * dt));
     }
@@ -359,6 +494,8 @@ public class HindLegKickController : MonoBehaviour
     private void ArmLeg(Leg leg, float strength01)
     {
         if (leg == null || leg.ikTarget == null) return;
+        if (leg.pendingKick) return;
+
         leg.pendingKick = true;
         leg.phase01 = 0f;
         leg.strength01 = strength01;
@@ -367,7 +504,7 @@ public class HindLegKickController : MonoBehaviour
 
     private void UpdateLeg(Leg leg, float dt)
     {
-        if (leg == null || leg.ikTarget == null) return;
+        if (leg == null || leg.ikTarget == null || rootSpace == null) return;
 
         if (!leg.pendingKick)
         {
@@ -385,10 +522,12 @@ public class HindLegKickController : MonoBehaviour
         float cycleTime = Mathf.Lerp(baseCycleTime, minCycleTime, leg.strength01);
         leg.phase01 += dt / Mathf.Max(cycleTime, 1e-4f);
 
+        bool finishedThisFrame = false;
         if (leg.phase01 >= 1f)
         {
             leg.phase01 = 1f;
             leg.pendingKick = false;
+            finishedThisFrame = true;
         }
 
         float phaseUsed = ApplyDirectionFlip(leg.phase01);
@@ -401,6 +540,12 @@ public class HindLegKickController : MonoBehaviour
             desiredWorld,
             1f - Mathf.Exp(-targetPosLerp * dt)
         );
+
+        if (finishedThisFrame)
+        {
+            if (ReferenceEquals(leg, leftLeg)) _sinceLastKickLeft = 0f;
+            else if (ReferenceEquals(leg, rightLeg)) _sinceLastKickRight = 0f;
+        }
     }
 
     private float ApplyDirectionFlip(float phase01)
@@ -409,9 +554,6 @@ public class HindLegKickController : MonoBehaviour
         return invertTrajectoryDirection ? (1f - phase01) : phase01;
     }
 
-    // =========================
-    // Trajectory (phase starts at REST)
-    // =========================
     private float PhaseToThetaFromRest(float phase01)
     {
         float thetaRest = Mathf.Deg2Rad * restAngleDeg;
@@ -422,6 +564,21 @@ public class HindLegKickController : MonoBehaviour
     {
         Vector3 deltaW = ComputeTrajectoryDeltaWorld_FromRestPhase(leg, phase01, strength01);
         Vector3 deltaL = rootSpace.InverseTransformDirection(deltaW);
+
+        float forwardSpeed = _usedVelLocal.z; // +Z forward in rootSpace local
+        float forwardDemand01 = Mathf.Clamp01(forwardSpeed / Mathf.Max(forwardSpeedForFullBackStroke, 1e-4f));
+        float backStrokeScale = Mathf.Lerp(minBackStrokeScaleNoForward, 1f, forwardDemand01);
+
+        float sideScale = Mathf.Lerp(sideScaleAtNoTurn, sideScaleAtFullTurn, _turnDemand01);
+
+        if (leg.cachedIsInner && _turnDemand01 > 0f)
+        {
+            sideScale *= innerSideBoost;
+            backStrokeScale *= innerBackStrokeMultiplier;
+        }
+
+        deltaL.x *= sideScale;
+        if (deltaL.z < 0f) deltaL.z *= backStrokeScale;
 
         float y01 = (verticalArc != null) ? verticalArc.Evaluate(Mathf.Clamp01(phase01)) : phase01;
         float ySigned = (y01 - 0.5f) * 2f;
@@ -436,60 +593,53 @@ public class HindLegKickController : MonoBehaviour
         float aF = ellipseForwardRadius * ampMul;
         float aS = ellipseSecondaryRadius * ampMul;
 
-        // We compute tangent/side and bend amount from spine.
         GetSpineTangentAndBend(out Vector3 tangentXZ, out Vector3 sideXZ, out float spineTurnSign, out float turnAmount01);
 
-        // Turning SIGN can come from omegaY (recommended), while amount still uses spine bend magnitude.
         float turnSign = spineTurnSign;
         if (useOmegaYawForTurnSign)
         {
             turnSign = Mathf.Sign(_lastOmegaY);
-            // If omega is almost zero, treat as "no turn".
+            if (invertOmegaTurnSign) turnSign *= -1f;
             if (Mathf.Abs(_lastOmegaY) < 1e-4f) turnSign = 0f;
         }
 
         float legSideSign = GetLegSideSign(leg, sideXZ);
 
-        // If no meaningful turn, do not classify inner/outer strongly.
-        // In that case, we reduce separation by forcing turnAmount01=0.
         if (Mathf.Abs(turnSign) < 0.5f || turnAmount01 < 0.02f)
-        {
             turnAmount01 = 0f;
-        }
 
         bool isInnerLeg = (turnAmount01 > 0f) && (Mathf.Sign(legSideSign) == Mathf.Sign(turnSign));
+        leg.cachedIsInner = isInnerLeg;
         bool isOuterLeg = (turnAmount01 > 0f) && !isInnerLeg;
 
-        // === Your requested two-value controls ===
-        // Scale both by turnAmount01 so straight swimming doesn't exaggerate.
         float biasScale = Mathf.Clamp01(turnAmount01);
 
-        // --- Correct inner/outer angle semantics (per your diagram) ---
-        // Outer leg: rotate from tangent toward OUTSIDE by outerAngle
-        // Inner leg: rotate from tangent toward INSIDE by innerAngle
-        // Sign is derived from legSideSign (mirror) and inner/outer (side selection).
         float outerAngle = Mathf.Abs(outerTangentAngleOffsetDeg) * biasScale;
         float innerAngle = Mathf.Abs(innerTangentAngleOffsetDeg) * biasScale;
-        // Curve-based semantics:
-        // inner leg rotates toward curve INSIDE  ( +turnSign )
-        // outer leg rotates toward curve OUTSIDE ( -turnSign )
+
         float angleSignedDeg = isOuterLeg
             ? (-outerAngle * turnSign)
             : (innerAngle * turnSign);
 
-        // Kick axis is tangent rotated around world up.
         Quaternion rotBias = Quaternion.AngleAxis(angleSignedDeg, Vector3.up);
         Vector3 kickAxisXZ = (rotBias * tangentXZ).normalized;
 
-        // Secondary axis is side mirrored by leg side.
+        if (isInnerLeg && _turnDemand01 > 0f && innerNormalSteerStrength01 > 1e-3f)
+        {
+            Vector3 innerNormal = (-turnSign * sideXZ).normalized;
+
+            float forwardDemand01 = Mathf.Clamp01(_usedVelLocal.z / Mathf.Max(forwardSpeedForFullBackStroke, 1e-4f));
+            float steerBlend = Mathf.Clamp01(_turnDemand01 * (1f - forwardDemand01) * innerNormalSteerStrength01);
+
+            kickAxisXZ = Vector3.Slerp(kickAxisXZ, innerNormal, steerBlend).normalized;
+        }
+
         Vector3 secondaryAxisBase = (sideXZ * legSideSign).normalized;
 
-        // Tilt around tangent for "ellipse plane tilt"
         float outwardFlip = tiltOutward ? 1f : -1f;
         float signedTiltDeg = ellipsePlaneTiltDeg * legSideSign * outwardFlip;
         Vector3 secondaryAxisTilted = Quaternion.AngleAxis(signedTiltDeg, tangentXZ) * secondaryAxisBase;
 
-        // Lateral offset along the secondary axis, using the same curve-based semantics as angleSignedDeg.
         float outerOffset = Mathf.Abs(outerLateralOffsetMeters) * biasScale;
         float innerOffset = Mathf.Abs(innerLateralOffsetMeters) * biasScale;
         float lateralOffsetSigned = isOuterLeg
@@ -529,8 +679,8 @@ public class HindLegKickController : MonoBehaviour
 
     private void GetSpineTangentAndBend(out Vector3 tangentXZ, out Vector3 sideXZ, out float turnSign, out float turnAmount01)
     {
-        Vector3 t0 = rootSpace.forward;
-        Vector3 t1 = rootSpace.forward;
+        Vector3 t0 = rootSpace != null ? rootSpace.forward : Vector3.forward;
+        Vector3 t1 = t0;
 
         if (spineChain != null && spineChain.Length >= 3 &&
             spineChain[0] != null && spineChain[1] != null && spineChain[2] != null)
@@ -548,22 +698,22 @@ public class HindLegKickController : MonoBehaviour
         t0.y = 0f;
         t1.y = 0f;
 
-        if (t0.sqrMagnitude < 1e-6f) t0 = rootSpace.forward;
+        if (t0.sqrMagnitude < 1e-6f) t0 = (rootSpace != null ? rootSpace.forward : Vector3.forward);
         if (t1.sqrMagnitude < 1e-6f) t1 = t0;
 
         Vector3 n0 = t0.normalized;
         Vector3 n1 = t1.normalized;
 
         tangentXZ = n0;
+        if (invertSpineTangent) tangentXZ = -tangentXZ;
 
         sideXZ = Vector3.Cross(Vector3.up, tangentXZ).normalized;
-        if (sideXZ.sqrMagnitude < 1e-6f) sideXZ = rootSpace.right;
+        if (sideXZ.sqrMagnitude < 1e-6f)
+            sideXZ = (rootSpace != null ? rootSpace.right : Vector3.right);
 
-        // Curvature direction sign from spine itself (may overshoot / be asymmetric)
         float crossY = Vector3.Cross(n0, n1).y;
         turnSign = Mathf.Sign(crossY);
 
-        // Bend amount -> 0..1
         float bendAngle = Vector3.Angle(n0, n1);
         turnAmount01 = Mathf.Clamp01(bendAngle / Mathf.Max(1e-3f, bendAngleForFullTurnDeg));
 
