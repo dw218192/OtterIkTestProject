@@ -120,12 +120,43 @@ public class HindLegKickControllerNeo : MonoBehaviour
     [Tooltip("If speed of the USED point velocity is below this and no kick is running, legs return to rest.")]
     public float minSpeedToAnimate = 0.05f;
 
+    [Header("Hard stop interrupt")]
+    [Tooltip("If root is truly stopped (no translation, no rotation, no input), interrupt kicks and return to rest quickly.")]
+    public bool interruptKickWhenRootStopped = true;
+
+    [Tooltip("Consider root stopped when world velocity is below this (m/s).")]
+    public float stoppedSpeedEpsilon = 0.02f;
+
+    [Tooltip("Consider root stopped when abs(angular velocity) is below this (deg/s).")]
+    public float stoppedOmegaDegEpsilon = 6f;
+
+    [Tooltip("How much faster to lerp back to rest when interrupted at stop.")]
+    [Range(1f, 12f)]
+    public float stopReturnLerpBoost = 4f;
+
     [Header("Kick trigger (acceleration)")]
     public float accelTrigger = 0.8f;
     public float accelForFullStrength = 4.0f;
 
     [Tooltip("Minimum interval (seconds) between kicks. Applied to shared cooldown OR per-leg cooldown depending on mode.")]
     public float minKickInterval = 0.25f;
+ 
+    [Header("Cruise (mock accel)")]
+    [Tooltip("When true, if dv/dt is near zero but the otter is cruising (usedSpeed high), synthesize a small accel so kicks keep happening at steady speed.")]
+    public bool useMockAccelAtCruise = true;
+ 
+    [Tooltip("Cruise speed (m/s) at which mock accel starts to contribute.")]
+    public float cruiseSpeedForMockAccel = 0.25f;
+ 
+    [Tooltip("Mock accel magnitude (m/s^2) at full cruise (usedSpeed >= cruiseSpeedForMockAccel). Should be near accelTrigger.")]
+    public float mockAccelAtCruise = 0.9f;
+ 
+    [Header("Stopping suppression")]
+    [Tooltip("If true, suppress one last kick caused purely by deceleration spikes when coming to a stop.")]
+    public bool suppressKickOnStopDecel = true;
+ 
+    [Tooltip("If usedSpeed is below this and acceleration is against velocity, do not trigger kicks (prevents 'one extra kick at stop').")]
+    public float stopSpeedNoKick = 0.06f;
 
     [Header("Kick timing")]
     public float baseCycleTime = 0.55f;
@@ -379,6 +410,36 @@ public class HindLegKickControllerNeo : MonoBehaviour
             _smoothedUsedVel = Vector3.Lerp(_smoothedUsedVel, usedVelRaw, a);
         }
 
+        // Hard stop interrupt: if root truly stopped, cancel any ongoing kicks and snap back to rest fast.
+        if (interruptKickWhenRootStopped && movement != null && !movement.IsDragging())
+        {
+            float v2 = movement.GetVelocity().sqrMagnitude;
+            float w = Mathf.Abs(movement.GetAngularVelocityDeg());
+
+            if (v2 <= stoppedSpeedEpsilon * stoppedSpeedEpsilon && w <= stoppedOmegaDegEpsilon)
+            {
+                // Cancel both legs immediately
+                leftLeg.pendingKick = false;
+                leftLeg.delayTimer = 0f;
+                leftLeg.phase01 = 0f;
+                leftLeg.strength01 = 0f;
+
+                rightLeg.pendingKick = false;
+                rightLeg.delayTimer = 0f;
+                rightLeg.phase01 = 0f;
+                rightLeg.strength01 = 0f;
+
+                _sharedKickInProgress = false;
+
+                // Return quickly to rest
+                ReturnToRestFast(leftLeg, dt, stopReturnLerpBoost);
+                ReturnToRestFast(rightLeg, dt, stopReturnLerpBoost);
+
+                _prevUsedVel = _smoothedUsedVel;
+                return;
+            }
+        }
+
         // Demand mapping in root local space
         _usedVelLocal = rootSpace.InverseTransformDirection(_smoothedUsedVel);
         float omegaAbs = Mathf.Abs(_lastOmegaY);
@@ -400,10 +461,27 @@ public class HindLegKickControllerNeo : MonoBehaviour
         _prevUsedVel = _smoothedUsedVel;
 
         float accelMag = usedAccel.magnitude;
+        float effectiveAccelMag = accelMag;
 
-        if (accelMag >= accelTrigger)
+        // Prevent a "last kick" when we fully stop: decel spike can cross accelTrigger even though intention is stop.
+        if (suppressKickOnStopDecel && usedSpeed <= stopSpeedNoKick)
         {
-            float strength01 = Mathf.Clamp01(Mathf.InverseLerp(accelTrigger, accelForFullStrength, accelMag));
+            // If accel points opposite to current velocity => decelerating
+            if (Vector3.Dot(usedAccel, _smoothedUsedVel) < 0f)
+                effectiveAccelMag = 0f;
+        }
+
+        // Cruise mock-accel: if dv/dt is tiny (steady speed), still keep a rhythmic kick at cruise speeds.
+        if (useMockAccelAtCruise && effectiveAccelMag < accelTrigger)
+        {
+            float cruise01 = Mathf.InverseLerp(cruiseSpeedForMockAccel, cruiseSpeedForMockAccel * 2f, usedSpeed);
+            float mockA = Mathf.Lerp(0f, mockAccelAtCruise, cruise01);
+            effectiveAccelMag = Mathf.Max(effectiveAccelMag, mockA);
+        }
+
+        if (effectiveAccelMag >= accelTrigger)
+        {
+            float strength01 = Mathf.Clamp01(Mathf.InverseLerp(accelTrigger, accelForFullStrength, effectiveAccelMag));
 
             if (useSharedCooldown)
             {
@@ -483,6 +561,14 @@ public class HindLegKickControllerNeo : MonoBehaviour
         if (leg == null || leg.ikTarget == null || rootSpace == null) return;
         Vector3 restWorld = rootSpace.TransformPoint(leg.restLocalPos);
         leg.ikTarget.position = Vector3.Lerp(leg.ikTarget.position, restWorld, 1f - Mathf.Exp(-targetPosLerp * dt));
+    }
+
+    private void ReturnToRestFast(Leg leg, float dt, float boost)
+    {
+        if (leg == null || leg.ikTarget == null || rootSpace == null) return;
+        Vector3 restWorld = rootSpace.TransformPoint(leg.restLocalPos);
+        float k = targetPosLerp * Mathf.Max(1f, boost);
+        leg.ikTarget.position = Vector3.Lerp(leg.ikTarget.position, restWorld, 1f - Mathf.Exp(-k * dt));
     }
 
     private void TriggerKick(float strength01)
