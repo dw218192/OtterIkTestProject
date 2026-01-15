@@ -37,12 +37,21 @@ public class HeadIKGuideFromArrow : MonoBehaviour
     [Tooltip("If true, keep guide movement on XZ plane.")]
     [SerializeField] private bool planarOnly = true;
 
+    [Header("Release Blend")]
+    [Tooltip("Blend time when leaving drag to avoid snap back to idle forward.")]
+    [SerializeField] private float releaseBlendTime = 0.35f;
+
     [Header("Debug")]
     [SerializeField] private bool drawGizmos = true;
     [SerializeField] private float gizmoRadius = 0.06f;
 
     private float PlaneY
         => useFixedPlaneY ? fixedPlaneY : (anchor != null ? anchor.position.y : (movement != null ? movement.transform.position.y : 0f));
+
+    private Vector3 lastActiveTarget;
+    private float releaseBlendTimer;
+    private bool releaseBlendActive;
+    private bool wasDragging;
 
     private void Awake() => EnsureRefs();
     private void OnEnable() => EnsureRefs();
@@ -54,6 +63,7 @@ public class HeadIKGuideFromArrow : MonoBehaviour
         if (anchor == null) anchor = movement.transform;
 
         bool dragging = movement.IsDragging();
+        bool justReleased = (!dragging && wasDragging);
         var zone = movement.GetZone();
 
         // If idle and user wants no idle guide, hide.
@@ -65,6 +75,18 @@ public class HeadIKGuideFromArrow : MonoBehaviour
 
         Vector3 targetPos;
 
+        if (dragging)
+        {
+            releaseBlendActive = false;
+            releaseBlendTimer = 0f;
+        }
+        else if (justReleased)
+        {
+            releaseBlendActive = true;
+            releaseBlendTimer = 0f;
+            if (lastActiveTarget == Vector3.zero) lastActiveTarget = headIKGuide.position;
+        }
+
         if (!dragging)
         {
             // Idle: keep a stable point in front of the body (or last-known facing).
@@ -73,7 +95,24 @@ public class HeadIKGuideFromArrow : MonoBehaviour
             if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
             fwd.Normalize();
 
-            targetPos = anchor.position + fwd * idleForward;
+            Vector3 idleTarget = anchor.position + fwd * idleForward;
+
+            if (releaseBlendActive)
+            {
+                float dt = Time.deltaTime;
+                releaseBlendTimer += dt;
+                float t = releaseBlendTime <= 0f ? 1f : Mathf.Clamp01(releaseBlendTimer / releaseBlendTime);
+                targetPos = Vector3.Lerp(lastActiveTarget, idleTarget, t);
+                if (t >= 0.999f)
+                {
+                    releaseBlendActive = false;
+                    lastActiveTarget = idleTarget;
+                }
+            }
+            else
+            {
+                targetPos = idleTarget;
+            }
         }
         else
         {
@@ -88,6 +127,7 @@ public class HeadIKGuideFromArrow : MonoBehaviour
                 lead = dir.normalized * extraLead;
 
             targetPos = carrot + lead;
+            lastActiveTarget = targetPos;
 
             // Optional: in Aim zone you may want the guide a bit closer (tighter head control).
             // Keeping it as-is is usually fine, because carrotRadiusAim should already be smaller.
@@ -98,6 +138,8 @@ public class HeadIKGuideFromArrow : MonoBehaviour
 
         headIKGuide.position = SmoothMove(headIKGuide.position, targetPos);
         headIKGuide.gameObject.SetActive(true);
+
+        wasDragging = dragging;
     }
 
     private Vector3 SmoothMove(Vector3 current, Vector3 target)

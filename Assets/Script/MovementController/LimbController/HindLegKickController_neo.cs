@@ -56,6 +56,7 @@ public class HindLegKickControllerNeo : MonoBehaviour
         [HideInInspector] public float delayTimer;
         [HideInInspector] public bool cachedIsInner;
         [HideInInspector] public float phase01;
+        [HideInInspector] public float phaseOffset01; // per-kick phase jitter (anti-sync)
         [HideInInspector] public float strength01;
         [HideInInspector] public bool restInitialized;
     }
@@ -120,6 +121,16 @@ public class HindLegKickControllerNeo : MonoBehaviour
     [Tooltip("If speed of the USED point velocity is below this and no kick is running, legs return to rest.")]
     public float minSpeedToAnimate = 0.05f;
 
+    [Header("Stop gate (prevent last kick)")]
+    [Tooltip("If the ROOT is truly stopped (no translation, no rotation), do not start new kicks even if accel spikes occur.")]
+    public bool gateTriggerWhenRootStopped = true;
+
+    [Tooltip("Root is considered stopped if MovementController velocity is below this (m/s).")]
+    public float rootStoppedSpeedEpsilon = 0.02f;
+
+    [Tooltip("Root is considered stopped if MovementController angular velocity is below this (deg/s).")]
+    public float rootStoppedOmegaDegEpsilon = 6f;
+
     [Header("Hard stop interrupt")]
     [Tooltip("If root is truly stopped (no translation, no rotation, no input), interrupt kicks and return to rest quickly.")]
     public bool interruptKickWhenRootStopped = true;
@@ -133,6 +144,10 @@ public class HindLegKickControllerNeo : MonoBehaviour
     [Tooltip("How much faster to lerp back to rest when interrupted at stop.")]
     [Range(1f, 12f)]
     public float stopReturnLerpBoost = 4f;
+
+    [Header("Delay re-check")]
+    [Tooltip("If true, when a kick is pending (delayTimer > 0), we re-check conditions right before the kick actually starts.")]
+    public bool recheckBeforeKickAfterDelay = true;
 
     [Header("Kick trigger (acceleration)")]
     public float accelTrigger = 0.8f;
@@ -161,6 +176,14 @@ public class HindLegKickControllerNeo : MonoBehaviour
     [Header("Kick timing")]
     public float baseCycleTime = 0.55f;
     public float minCycleTime = 0.25f;
+
+    [Header("Desync noise (optional)")]
+    [Tooltip("Already supported: per-leg randomDelayMax produces a small start delay jitter. This section adds phase jitter too.")]
+    public bool enablePhaseJitter = true;
+
+    [Tooltip("Adds a small per-kick phase offset (0..1). Keep SMALL to avoid noticeable pops. Recommended 0.02~0.06.")]
+    [Range(0f, 0.15f)]
+    public float phaseJitterMax01 = 0.04f;
 
     [Header("Ellipse design")]
     public float ellipseForwardRadius = 0.18f;
@@ -471,6 +494,18 @@ public class HindLegKickControllerNeo : MonoBehaviour
                 effectiveAccelMag = 0f;
         }
 
+        // Root-stopped gate: if root truly has no translation and no rotation, block any new kick triggers.
+        // This catches both dv/dt spikes and tiny omega jitter, and does NOT depend on dragging state.
+        if (gateTriggerWhenRootStopped && movement != null)
+        {
+            float v2 = movement.GetVelocity().sqrMagnitude;
+            float wDeg = Mathf.Abs(movement.GetAngularVelocityDeg());
+            if (v2 <= rootStoppedSpeedEpsilon * rootStoppedSpeedEpsilon && wDeg <= rootStoppedOmegaDegEpsilon)
+            {
+                effectiveAccelMag = 0f;
+            }
+        }
+
         // Cruise mock-accel: if dv/dt is tiny (steady speed), still keep a rhythmic kick at cruise speeds.
         if (useMockAccelAtCruise && effectiveAccelMag < accelTrigger)
         {
@@ -586,6 +621,9 @@ public class HindLegKickControllerNeo : MonoBehaviour
         leg.phase01 = 0f;
         leg.strength01 = strength01;
         leg.delayTimer = Random.Range(0f, leg.randomDelayMax);
+        leg.phaseOffset01 = (enablePhaseJitter && phaseJitterMax01 > 0f)
+            ? Random.Range(-phaseJitterMax01, phaseJitterMax01)
+            : 0f;
     }
 
     private void UpdateLeg(Leg leg, float dt)
@@ -602,6 +640,29 @@ public class HindLegKickControllerNeo : MonoBehaviour
         {
             leg.delayTimer -= dt;
             ReturnToRest(leg, dt);
+
+            // Re-check right at the boundary: if delay just finished, verify we still want to kick.
+            if (recheckBeforeKickAfterDelay && leg.delayTimer <= 0f)
+            {
+                if (movement != null)
+                {
+                    float v2 = movement.GetVelocity().sqrMagnitude;
+                    float wDeg = Mathf.Abs(movement.GetAngularVelocityDeg());
+                    bool rootStopped = (v2 <= stoppedSpeedEpsilon * stoppedSpeedEpsilon) && (wDeg <= stoppedOmegaDegEpsilon);
+
+                    // If root is stopped, cancel this pending kick instead of letting it begin after delay.
+                    if (rootStopped)
+                    {
+                        leg.pendingKick = false;
+                        leg.phase01 = 0f;
+                        leg.strength01 = 0f;
+                        leg.delayTimer = 0f;
+                        ReturnToRestFast(leg, dt, stopReturnLerpBoost);
+                        return;
+                    }
+                }
+            }
+
             return;
         }
 
@@ -616,7 +677,7 @@ public class HindLegKickControllerNeo : MonoBehaviour
             finishedThisFrame = true;
         }
 
-        float phaseUsed = ApplyDirectionFlip(leg.phase01);
+        float phaseUsed = ApplyDirectionFlip(Mathf.Clamp01(leg.phase01 + leg.phaseOffset01));
 
         Vector3 localPos = ComputeKickLocalPosition(leg, phaseUsed, leg.strength01);
         Vector3 desiredWorld = rootSpace.TransformPoint(localPos);

@@ -75,6 +75,9 @@ public class MovementController : MonoBehaviour
     private MoveZone zone = MoveZone.None;
 
     private float currentSpeed;
+    private float targetSpeed;          // NEW: cached each frame
+    private float dvdt;                // NEW: speed derivative (m/s^2)
+    private float prevSpeed;           // NEW: for dvdt
     private float currentOmegaDeg;    // signed angular velocity (deg/s)
 
     private Vector3 worldDir = Vector3.forward;  // desired direction on XZ
@@ -223,7 +226,7 @@ public class MovementController : MonoBehaviour
         float dt = Time.deltaTime;
 
         // Determine target speed from zone (forward-only; no reverse).
-        float targetSpeed = 0f;
+        targetSpeed = 0f;
         if (isDragging)
         {
             if (zone == MoveZone.Swim) targetSpeed = swimSpeed;
@@ -233,6 +236,10 @@ public class MovementController : MonoBehaviour
 
         // Smooth speed
         currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, speedAcceleration * dt);
+
+        // NEW: dv/dt telemetry for IK (hind kick) + debugging
+        dvdt = (currentSpeed - prevSpeed) / Mathf.Max(dt, 1e-5f);
+        prevSpeed = currentSpeed;
 
         // Turning target direction: always toward "worldDir" (which is the same direction we use for carrot).
         Vector3 up = Vector3.up;
@@ -337,6 +344,12 @@ public class MovementController : MonoBehaviour
     public Vector3 GetVelocity() => velocity;
 
     public float GetCurrentSpeed() => currentSpeed;
+
+    /// <summary>Current target speed from input zone (0 when not dragging or in Aim).</summary>
+    public float GetTargetSpeed() => targetSpeed;
+
+    /// <summary>Speed derivative (m/s^2) computed from currentSpeed each frame.</summary>
+    public float GetSpeedDerivative() => dvdt;
 
     /// <summary>Signed angular velocity (deg/s) applied to the body.</summary>
     public float GetAngularVelocityDeg() => currentOmegaDeg;
