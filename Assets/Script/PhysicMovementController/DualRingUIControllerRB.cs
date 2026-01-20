@@ -1,19 +1,21 @@
 using UnityEngine;
 
 /// <summary>
-/// Dual ring UI drawn in WORLD SPACE (LineRenderer),
-/// centered at the CHARACTER (otter) position.
-/// With a following camera, rings appear at screen center.
+/// Dual ring UI drawn in WORLD SPACE (LineRenderer).
 ///
-/// Radii are defined in PIXELS and converted to WORLD units for ORTHOGRAPHIC cameras,
-/// so the UI stays visually consistent regardless of camera size/resolution.
+/// Updated behavior (per design):
+/// - Rings + arrow are centered at the CAMERA center (i.e., screen center), not the otter.
+/// - Radii are defined in PIXELS and converted to WORLD units for ORTHOGRAPHIC cameras,
+///   so the UI stays visually consistent regardless of camera size/resolution.
+///
+/// The otter can be off-center; the camera look-ahead determines how much (clamped).
 /// </summary>
 public class DualRingUIControllerRB : MonoBehaviour
 {
     [Header("References")]
     [SerializeField] private Camera uiCamera;
 
-    [Tooltip("The character/root transform the rings should follow (otter root).")]
+    [Tooltip("If set, rings follow this transform. Leave NULL to use uiCamera.transform (screen center).")]
     [SerializeField] private Transform followTarget;
 
     [Header("Plane (Water Surface)")]
@@ -21,8 +23,8 @@ public class DualRingUIControllerRB : MonoBehaviour
     [SerializeField] private float fixedPlaneY = 0f;
 
     [Header("Ring Radii (Pixels)")]
-    [SerializeField] private float innerRadiusPx = 120f;
-    [SerializeField] private float outerRadiusPx = 260f;
+    [SerializeField] private float innerRadiusPx = 300f;
+    [SerializeField] private float outerRadiusPx = 400f;
 
     [Header("Ring Geometry")]
     [SerializeField] private int ringSegments = 64;
@@ -58,8 +60,6 @@ public class DualRingUIControllerRB : MonoBehaviour
 
     private float PlaneY => useFixedPlaneY ? fixedPlaneY : centerWorld.y;
 
-
-
     private Vector2 _cachedDir;
     private float _cachedRadius;
     private bool _hasArrowInput;
@@ -75,17 +75,9 @@ public class DualRingUIControllerRB : MonoBehaviour
     {
         if (uiCamera == null) uiCamera = Camera.main;
 
-        // Auto-find MovementControllerRB (preferred) or MovementController as default follow target
-        if (followTarget == null)
-        {
-            var mvRB = FindObjectOfType<MovementControllerRB>();
-            if (mvRB != null) followTarget = mvRB.transform;
-            else
-            {
-                var mv = FindObjectOfType<MovementController>();
-                if (mv != null) followTarget = mv.transform;
-            }
-        }
+        // Default: screen-centered UI -> follow the camera.
+        if (followTarget == null && uiCamera != null)
+            followTarget = uiCamera.transform;
 
         CreateRings();
         CreateArrow();
@@ -101,15 +93,7 @@ public class DualRingUIControllerRB : MonoBehaviour
         if (uiCamera == null) return;
 
         if (followTarget == null)
-        {
-            var mvRB = FindObjectOfType<MovementControllerRB>();
-            if (mvRB != null) followTarget = mvRB.transform;
-            else
-            {
-                var mv = FindObjectOfType<MovementController>();
-                if (mv != null) followTarget = mv.transform;
-            }
-        }
+            followTarget = uiCamera.transform;
 
         RecomputeWorldRadii(force: false);
         UpdateCenterFromTarget();
@@ -156,7 +140,7 @@ public class DualRingUIControllerRB : MonoBehaviour
 
     private void CreateRings()
     {
-        ringContainer = new GameObject("RingContainer_CharacterCentered");
+        ringContainer = new GameObject("RingContainer_CameraCentered");
         ringContainer.transform.SetParent(transform, worldPositionStays: true);
 
         GameObject innerGO = new GameObject("InnerRing");
@@ -174,7 +158,7 @@ public class DualRingUIControllerRB : MonoBehaviour
 
     private void CreateArrow()
     {
-        arrowObject = new GameObject("DirectionArrow_CharacterCentered");
+        arrowObject = new GameObject("DirectionArrow_CameraCentered");
         arrowObject.transform.SetParent(transform, worldPositionStays: true);
 
         arrow = arrowObject.AddComponent<LineRenderer>();
@@ -212,6 +196,10 @@ public class DualRingUIControllerRB : MonoBehaviour
     {
         if (ringContainer != null)
             ringContainer.transform.position = centerWorld;
+
+        // Arrow is world-space; keep its container centered too.
+        if (arrowObject != null)
+            arrowObject.transform.position = centerWorld;
     }
 
     private void RecomputeWorldRadii(bool force)
@@ -234,6 +222,7 @@ public class DualRingUIControllerRB : MonoBehaviour
 
         if (!uiCamera.orthographic)
         {
+            // Fallback constant scale for perspective cameras.
             innerRadiusWorld = innerRadiusPx * 0.01f;
             outerRadiusWorld = outerRadiusPx * 0.01f;
         }
@@ -278,4 +267,15 @@ public class DualRingUIControllerRB : MonoBehaviour
         w.y = 0f;
         return w.sqrMagnitude > 1e-6f ? w.normalized : Vector3.forward;
     }
+
+#if UNITY_EDITOR
+    private void OnValidate()
+    {
+        ringSegments = Mathf.Clamp(ringSegments, 12, 256);
+        innerRadiusPx = Mathf.Max(1f, innerRadiusPx);
+        outerRadiusPx = Mathf.Max(innerRadiusPx + 1f, outerRadiusPx);
+        ringWidthWorld = Mathf.Max(0.0001f, ringWidthWorld);
+        arrowWidthWorld = Mathf.Max(0.0001f, arrowWidthWorld);
+    }
+#endif
 }

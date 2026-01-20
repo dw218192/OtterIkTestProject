@@ -1,18 +1,15 @@
 using UnityEngine;
 
 /// <summary>
-/// Simple water resistance model for a Rigidbody.
+/// Water resistance model for a Rigidbody.
 ///
-/// Applies a combination of:
-/// - Linear drag:     F = -k * v
-/// - Quadratic drag:  F = -k2 * |v| * v
-/// Optionally applies angular drag as torque in the same manner.
+/// Applies:
+/// - Linear drag:    F = -k * v
+/// - Quadratic drag: F = -k2 * |v| * v
 ///
-/// Designed for top-down "on the surface" swimming:
-/// - By default it only considers horizontal (XZ) velocity.
-/// - Pair with Rigidbody constraints (Freeze Y, Freeze X/Z rotation) for stability.
-///
-/// Put this on the same GameObject as the Rigidbody.
+/// Notes:
+/// - Default coefficients are tuned for "reach then cruise" with impulse propulsion.
+/// - In top-down surface swimming, we usually apply drag on horizontal (XZ) only.
 /// </summary>
 [DisallowMultipleComponent]
 [DefaultExecutionOrder(100)]
@@ -22,28 +19,21 @@ public class WaterDrag : MonoBehaviour
     [SerializeField] private Rigidbody rb;
 
     [Header("Linear drag (N per (m/s))")]
-    [Tooltip("Higher = slows more at all speeds.")]
-    [SerializeField] private float linear = 6.0f;
+    [Tooltip("Higher slows more at low speeds. Too high makes start/cruise feel tractor-like.")]
+    [SerializeField] private float linear = 3.0f;
 
     [Header("Quadratic drag (N per (m/s)^2)")]
-    [Tooltip("Higher = slows MUCH more at high speeds (more water-like).")]
-    [SerializeField] private float quadratic = 0.0f;
+    [Tooltip("Higher slows MUCH more at high speeds, providing a natural terminal speed.")]
+    [SerializeField] private float quadratic = 0.5f;
 
     [Header("Angular drag (torque)")]
-    [Tooltip("Linear angular drag coefficient (torque per (rad/s)).")]
-    [SerializeField] private float angularLinear = 1.5f;
-
-    [Tooltip("Quadratic angular drag coefficient (torque per (rad/s)^2).")]
+    [SerializeField] private float angularLinear = 1.0f;
     [SerializeField] private float angularQuadratic = 0.0f;
 
     [Header("Plane")]
-    [Tooltip("Only apply drag to horizontal velocity (XZ).")]
     [SerializeField] private bool horizontalOnly = true;
 
-    private void Reset()
-    {
-        rb = GetComponent<Rigidbody>();
-    }
+    private void Reset() => rb = GetComponent<Rigidbody>();
 
     private void Awake()
     {
@@ -54,7 +44,7 @@ public class WaterDrag : MonoBehaviour
     {
         if (rb == null) return;
 
-        // -------- Linear + quadratic drag on velocity --------
+        // Velocity drag
         Vector3 v = rb.velocity;
         if (horizontalOnly) v.y = 0f;
 
@@ -62,16 +52,14 @@ public class WaterDrag : MonoBehaviour
         if (speed > 1e-4f)
         {
             // F = -(linear + quadratic*|v|) * v
-            float coeff = linear + quadratic * speed;
-            Vector3 dragForce = -coeff * v;
-            rb.AddForce(dragForce, ForceMode.Force);
+            float coeff = Mathf.Max(0f, linear) + Mathf.Max(0f, quadratic) * speed;
+            rb.AddForce(-coeff * v, ForceMode.Force);
         }
 
-        // -------- Angular drag (optional) --------
-        Vector3 w = rb.angularVelocity; // rad/s
+        // Angular drag (optional)
+        Vector3 w = rb.angularVelocity;
         if (horizontalOnly)
         {
-            // In top-down swim we typically only care about yaw (y axis).
             w.x = 0f;
             w.z = 0f;
         }
@@ -79,13 +67,11 @@ public class WaterDrag : MonoBehaviour
         float wMag = w.magnitude;
         if (wMag > 1e-4f)
         {
-            float coeff = angularLinear + angularQuadratic * wMag;
-            Vector3 dragTorque = -coeff * w;
-            rb.AddTorque(dragTorque, ForceMode.Force);
+            float coeff = Mathf.Max(0f, angularLinear) + Mathf.Max(0f, angularQuadratic) * wMag;
+            rb.AddTorque(-coeff * w, ForceMode.Force);
         }
     }
 
-    // Convenience API for runtime tuning
     public void SetCoefficients(float linearCoeff, float quadraticCoeff)
     {
         linear = Mathf.Max(0f, linearCoeff);
