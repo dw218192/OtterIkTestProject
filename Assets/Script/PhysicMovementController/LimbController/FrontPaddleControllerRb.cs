@@ -83,6 +83,10 @@ public class FrontPaddleControllerRb : MonoBehaviour
     [Tooltip("If true, while turning strongly we keep repeating strokes with the above interval. If false, one stroke per 'want' rising edge.")]
     [SerializeField] private bool repeatWhileTurning = true;
 
+    [Header("Paddle Strength Floor")]
+    [Tooltip("Minimum effective paddle strength when a stroke is active (0–1).")]
+    [SerializeField] private float minPaddleStrength = 0.25f;
+
     [Header("Ellipse Shape (at full strength)")]
     [SerializeField] private float outwardRadiusFull = 0.18f;
     [SerializeField] private float backwardRadiusFull = 0.12f;
@@ -556,8 +560,11 @@ public class FrontPaddleControllerRb : MonoBehaviour
     {
         GetEllipseBasisWorld(side, out outW, out Vector3 backW, out upW);
 
-        float rOut = outwardRadiusFull * strength01;
-        float rBack = backwardRadiusFull * strength01;
+        float effectiveStrength =
+            (strength01 > 0f) ? Mathf.Max(strength01, minPaddleStrength) : 0f;
+
+        float rOut = outwardRadiusFull * effectiveStrength;
+        float rBack = backwardRadiusFull * effectiveStrength;
 
         Vector3 restW = GetRestWorld(side);
 

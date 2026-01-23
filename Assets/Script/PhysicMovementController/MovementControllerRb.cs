@@ -1,20 +1,31 @@
-using System;
-using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
 /// Rigidbody-driven swimming controller (mouse + dual-ring UI).
 ///
-/// Semantics:
-/// - Aim   (inside inner ring): rotate only, targetSpeed = 0.
-/// - Swim  (between rings):    targetSpeed = swimSpeed; try to reach + maintain.
-/// - Sprint(outside outer):    targetSpeed = sprintSpeed; try to reach + maintain.
+/// Zones:
+/// - Aim   (inside inner ring): rotate only, no propulsion.
+/// - Swim  (between rings):    targetSpeed = swimAvgSpeed.
+/// - Sprint(outside outer):    targetSpeed = sprintTargetSpeed.
 ///
-/// Key behavior:
-/// - Acceleration phase: noticeable discrete kicks.
-/// - Cruise phase: near-constant speed with periodic maintenance kicks.
-/// - If maintaining the requested speed would require a kick rate above the configured max,
-///   the controller saturates and the otter is allowed to slow/stop/move backward due to water forces.
+/// Propulsion rhythm (no frequency settings):
+///   Prepare -> Kick -> Interval -> repeat
+///
+/// Parameters are defined in time-domain only:
+/// - K = Prepare + Kick duration, bounded by [KMin, KMax] per mode
+/// - I = Interval duration, bounded by [IMin, IMax] per mode
+/// - R = KickTime / PrepareTime (ratio)
+///
+/// Demand is derived from speed deficit along propulsion direction:
+///   demand01 = clamp01( (targetSpeed - vAlong) / demandDvRef )
+///
+/// Mapping:
+/// - Higher demand => shorter K, shorter I, larger impulse.
+/// - Lower  demand => longer  K, longer  I, smaller impulse.
+///
+/// Debug viz:
+/// - Shows a "pre-kick" arrow during the N seconds before each kick.
+/// - Arrow points toward the otter's rear (opposite facing) and has adjustable length range.
 /// </summary>
 [DisallowMultipleComponent]
 [DefaultExecutionOrder(200)]
@@ -22,158 +33,124 @@ public class MovementControllerRB : MonoBehaviour
 {
     public enum MoveZone { None, Aim, Swim, Sprint }
 
-    /// <summary>
-    /// Fired once per actual propulsion impulse (each rb.AddForce(..., ForceMode.Impulse)).
-    /// Use this for strict animation sync (hind limbs, splash VFX, etc.).
-    /// </summary>
-    public event Action OnKickImpulse;
-
-    /// <summary>
-    /// Same as OnKickImpulse, but includes the solved cadence parameters for this impulse.
-    /// impulse: the actual impulse used for this AddForce (N*s)
-    /// rateHz : desired kick rate at the moment of this impulse (Hz)
-    /// </summary>
-    public event Action<float, float> OnKickImpulseDetailed;
-
     [Header("References")]
     [SerializeField] private Camera inputCamera;
     [SerializeField] private DualRingUIControllerRB ui;
     [SerializeField] private Rigidbody rb;
 
-    [Header("Water surface plane")]
+    [Header("Water plane")]
     [SerializeField] private bool useFixedPlaneY = true;
     [SerializeField] private float fixedPlaneY = 0f;
 
     [Header("Target speeds")]
-    [SerializeField] private float swimSpeed = 2.4f;
-    [SerializeField] private float sprintSpeed = 4.2f;
+    [SerializeField] private float swimAvgSpeed = 2.4f;
+    [SerializeField] private float sprintTargetSpeed = 4.2f;
 
-    [Header("Acceleration time-scales (if not force-limited)")]
-    [Tooltip("Desired time-scale to close speed gap (along intent) during Swim acceleration.")]
-    [SerializeField] private float swimAccelTime = 1.1f;
+    [Header("Rhythm ratio")]
+    [Tooltip("R = KickTime / PrepareTime. Example: 0.35 means kick is shorter than prepare.")]
+    [SerializeField] private float kickToPrepareRatioR = 0.35f;
 
-    [Tooltip("Desired time-scale to close speed gap (along intent) during Sprint acceleration.")]
-    [SerializeField] private float sprintAccelTime = 0.30f;
+    [Header("Swim K bounds (Prepare+Kick)")]
+    [SerializeField] private float swimKMin = 0.18f;
+    [SerializeField] private float swimKMax = 0.38f;
 
-    [Header("Kick limits")]
-    [SerializeField] private float kickRateMaxSwim = 4.2f;
-    [SerializeField] private float kickRateMaxSprint = 6.5f;
-    [SerializeField] private float impulseMaxSwim = 2.1f;
-    [SerializeField] private float impulseMaxSprint = 3.2f;
+    [Header("Swim I bounds (Interval)")]
+    [SerializeField] private float swimIMin = 0.08f;
+    [SerializeField] private float swimIMax = 0.26f;
 
-    [Header("Kick timing")]
-    [Tooltip("Delay between kick event (animation) and when force is applied.")]
-    [SerializeField] private float kickForceDelay = 0.06f;
+    [Header("Sprint K bounds (Prepare+Kick)")]
+    [SerializeField] private float sprintKMin = 0.12f;
+    [SerializeField] private float sprintKMax = 0.28f;
 
-    [Header("Cruise behavior")]
-    [Tooltip("When (targetSpeed - vAlongIntent) <= this, we consider ourselves in cruise/maintenance mode.")]
-    [SerializeField] private float cruiseEnterDv = 0.20f;
+    [Header("Sprint I bounds (Interval)")]
+    [SerializeField] private float sprintIMin = 0.06f;
+    [SerializeField] private float sprintIMax = 0.18f;
 
-    [Tooltip("Minimum kick rate during cruise (helps avoid tractor-like stop-go).")]
-    [SerializeField] private float cruiseKickRateMinSwim = 2.2f;
+    [Header("Impulse bounds (demand -> impulse)")]
+    [SerializeField] private float swimImpulseMin = 0.12f;
+    [SerializeField] private float swimImpulseMax = 1.10f;
+    [SerializeField] private float sprintImpulseMin = 0.25f;
+    [SerializeField] private float sprintImpulseMax = 2.20f;
 
-    [Tooltip("Minimum kick rate during cruise in Sprint.")]
-    [SerializeField] private float cruiseKickRateMinSprint = 3.0f;
+    [Tooltip(">1 makes low-demand kicks much lighter and high-demand kicks much stronger.")]
+    [SerializeField] private float impulseGamma = 1.8f;
 
-    [Tooltip("Smallest impulse allowed for a maintenance kick.")]
-    [SerializeField] private float cruiseImpulseMin = 0.08f;
+    [Header("Demand mapping")]
+    [Tooltip("Speed deficit (m/s) considered 'full demand'. dv/dvRef -> demand 0..1.")]
+    [SerializeField] private float demandDvRef = 1.0f;
 
-    [Tooltip("If speed is above target by more than this, skip kicks and let water slow us down.")]
-    [SerializeField] private float overSpeedDeadband = 0.06f;
+    [Header("Turning delay (propulsion direction inertia)")]
+    [Tooltip("Max turn rate of propulsion direction (deg/sec). Smaller = more delayed turns. 0 disables.")]
+    [SerializeField] private float maxTurnRateDegPerSec = 180f;
 
-    [Header("Fast stop")]
-    [SerializeField] private float idleBrakeAccel = 12.0f;
-    [SerializeField] private float stopSpeedEpsilon = 0.10f;
+    [Header("Turn rate by speed")]
+    [SerializeField] private float turnRateIdle = 180f;
+    [SerializeField] private float turnRateSwim = 120f;
+    [SerializeField] private float turnRateSpeedStart = 0.15f; // v0
 
     [Header("Facing (root yaw via Rigidbody)")]
-    [Tooltip("How fast the root yaws toward the intent direction. 0 disables yaw follow.")]
     [SerializeField] private float faceSmoothing = 20f;
 
-    [Header("Facing delay (optional)")]
-    [Tooltip("Delay (seconds) applied to facing target direction. 0 = no delay.")]
-    [SerializeField] private float faceDelaySeconds = 0.08f;
+    [Header("Fast stop")]
+    [SerializeField] private float idleBrakeAccel = 12f;
+    [SerializeField] private float stopSpeedEpsilon = 0.10f;
 
-    [Tooltip("Ring buffer capacity for delayed facing samples. Larger = safer for big delays.")]
-    [SerializeField] private int faceDelayBufferSize = 96;
+    [Header("Carrot / guide (for IK & UI)")]
+    [SerializeField] private float carrotRadiusAim = 1.2f;
+    [SerializeField] private float carrotRadiusSwim = 2.0f;
+    [SerializeField] private float carrotRadiusSprint = 2.8f;
 
-    [Header("Turn slow down (reduce speed while turning)")]
-    [Tooltip("Below this angle (deg), do not slow down.")]
-    [SerializeField] private float turnSlowdownStartAngle = 15f;
-
-    [Tooltip("At/above this angle (deg), slow down reaches maximum.")]
-    [SerializeField] private float turnSlowdownMaxAngle = 90f;
-
-    [Tooltip("Minimum speed multiplier when turning hard (0..1).")]
-    [Range(0f, 1f)]
-    [SerializeField] private float minTurnSpeedFactor = 0.35f;
-
-    [Tooltip("How quickly the speed multiplier reacts (bigger = snappier).")]
-    [SerializeField] private float turnSlowdownSmoothing = 10f;
-
-    [Header("Input smoothing (screen space)")]
+    [Header("Input smoothing")]
     [SerializeField] private float inputSmoothing = 18f;
 
-    [Header("Carrot / guide (for IK)")]
-    [SerializeField] private float carrotRadiusAim = 1.5f;
-    [SerializeField] private float carrotRadiusSwim = 2.2f;
-    [SerializeField] private float carrotRadiusSprint = 3.0f;
+    [Header("Pre-kick visualization")]
+    [Tooltip("Show preview during the N seconds BEFORE the kick impulse.")]
+    [SerializeField] private float preKickGizmoLead = 0.20f;
+
+    [Tooltip("Side offset so preview doesn't overlap other arrow visuals.")]
+    [SerializeField] private float kickVizSideOffset = 0.35f;
+
+    [Tooltip("Raise preview slightly above plane.")]
+    [SerializeField] private float kickVizUpOffset = 0.06f;
+
+    [Tooltip("Preview arrow length range (meters). Length scales with demand.")]
+    [SerializeField] private float kickVizLenMin = 0.6f;
+    [SerializeField] private float kickVizLenMax = 1.8f;
 
     [Header("Debug")]
     [SerializeField] private bool drawGizmos = true;
-    [SerializeField] private float gizmoVelScale = 1.0f;
-    [SerializeField] private float gizmoAccelScale = 0.25f;
-    [SerializeField] private float gizmoIntentScale = 1.0f;
 
     // ---------------- Runtime input ----------------
     private bool isDragging;
-    private Vector2 dirScreen;
-    private float radiusPx;
     private Vector2 dirScreenSm;
     private float radiusPxSm;
-
     private MoveZone zone = MoveZone.None;
 
-    // Intent/telemetry
-    private Vector3 worldDir = Vector3.forward; // unit on XZ
+    // Intent
+    private Vector3 worldDir = Vector3.forward; // desired on XZ
+    private Vector3 steerDir = Vector3.forward; // delayed direction used for propulsion/facing
     private float targetSpeed;
     private Vector3 carrotWorld;
-    private Vector3 centerWorld;
 
-    // Kick scheduler
-    private float kickTimer;
-    private float lastKickRate;
+    // Rhythm phase machine
+    private enum Phase { Prepare, Kick, Interval }
+    private Phase phase = Phase.Interval;
+    private float phaseRemain = 0f;
+
+    // Solved for current cycle (telemetry)
+    private float demand01;
+    private float K;            // prepare+kick
+    private float I;            // interval
+    private float prepareTime;
+    private float kickTime;
+    private float impulse;
+
+    // For pre-kick preview
+    private float nextKickTime;
+
+    // Debug/compat getters
+    private float lastKickRate;     // derived cadence (Hz), not a setting
     private float lastKickImpulse;
-    private readonly List<PendingKick> pendingKicks = new List<PendingKick>(8);
-
-    private struct PendingKick
-    {
-        public float timeRemaining;
-        public Vector3 dir;
-        public float impulse;
-    }
-
-    // Accel estimation (horizontal)
-    private Vector3 prevVelH;
-    private Vector3 accelH;
-
-    // Along-intent deceleration estimator for cruise
-    private float prevVProj;
-    private float dvProjDtSmoothed;
-
-    // Turn-speed coupling
-    private float turnSpeedFactor = 1f;
-
-    // Facing delay buffer
-    private float[] faceTimeBuf;
-    private Vector3[] faceDirBuf;
-    private int faceBufHead;
-    private int faceBufCount;
-
-    // Optional propulsion override for Special/Transitions
-    private bool propulsionOverride;
-    private float overrideTargetSpeed;
-    private float overrideKickRateMax;
-    private float overrideImpulseMax;
 
     private float PlaneY => useFixedPlaneY
         ? fixedPlaneY
@@ -193,20 +170,20 @@ public class MovementControllerRB : MonoBehaviour
         if (rb != null)
         {
             rb.useGravity = false;
-            // Keep on water plane + prevent roll/pitch.
             rb.constraints |= RigidbodyConstraints.FreezePositionY
                            | RigidbodyConstraints.FreezeRotationX
                            | RigidbodyConstraints.FreezeRotationZ;
-            // Ensure yaw is NOT frozen.
             rb.constraints &= ~RigidbodyConstraints.FreezeRotationY;
         }
 
-        prevVelH = Vector3.zero;
-        accelH = Vector3.zero;
-        prevVProj = 0f;
-        dvProjDtSmoothed = 0f;
+        worldDir = transform.forward; worldDir.y = 0f;
+        if (worldDir.sqrMagnitude > 1e-6f) worldDir.Normalize();
+        steerDir = worldDir.sqrMagnitude > 1e-6f ? worldDir : Vector3.forward;
 
-        InitFacingDelayBuffer();
+        // Start in a short interval so we don't instantly kick on play.
+        phase = Phase.Interval;
+        phaseRemain = 0.10f;
+        nextKickTime = Time.time + phaseRemain;
     }
 
     private void Update()
@@ -217,12 +194,10 @@ public class MovementControllerRB : MonoBehaviour
 
     private void FixedUpdate()
     {
-        ProcessPendingKicks();
-        UpdateFacingRigidbody();
-        UpdateTurnSpeedFactor();
-        ApplyPulsePropulsion();
+        UpdateSteerDir(Time.fixedDeltaTime);
+        UpdateFacing();
+        StepRhythm(Time.fixedDeltaTime);
         ApplyIdleBrakeAndPlaneLock();
-        UpdateAccelerationTelemetry();
     }
 
     // ---------------- Input ----------------
@@ -233,8 +208,6 @@ public class MovementControllerRB : MonoBehaviour
         {
             isDragging = true;
             Vector2 rawDir = GetDirFromCenter(Input.mousePosition, out float rawR);
-            dirScreen = rawDir;
-            radiusPx = rawR;
             dirScreenSm = rawDir;
             radiusPxSm = rawR;
         }
@@ -244,27 +217,25 @@ public class MovementControllerRB : MonoBehaviour
             zone = MoveZone.None;
             targetSpeed = 0f;
 
-            // Prevent old samples from influencing the next drag.
-            ClearFacingDelayBuffer();
+            // Stop UI arrow immediately (prevents "stuck arrow")
+            ui?.HideArrow();
         }
 
         if (!isDragging) return;
 
         Vector2 newDir = GetDirFromCenter(Input.mousePosition, out float newR);
-        dirScreen = newDir;
-        radiusPx = newR;
 
         float dt = Time.deltaTime;
         float k = inputSmoothing <= 0f ? 1f : (1f - Mathf.Exp(-inputSmoothing * dt));
-        dirScreenSm = Vector2.Lerp(dirScreenSm, dirScreen, k);
-        radiusPxSm = Mathf.Lerp(radiusPxSm, radiusPx, k);
+        dirScreenSm = Vector2.Lerp(dirScreenSm, newDir, k);
+        radiusPxSm = Mathf.Lerp(radiusPxSm, newR, k);
 
         float innerPx = (ui != null) ? ui.InnerRadiusPx : 120f;
         float outerPx = (ui != null) ? ui.OuterRadiusPx : 260f;
 
-        float clampedToOuter = Mathf.Clamp(radiusPxSm, 0f, outerPx);
-        if (clampedToOuter <= innerPx) zone = MoveZone.Aim;
-        else if (clampedToOuter < outerPx) zone = MoveZone.Swim;
+        float clamped = Mathf.Clamp(radiusPxSm, 0f, outerPx);
+        if (clamped <= innerPx) zone = MoveZone.Aim;
+        else if (clamped < outerPx) zone = MoveZone.Swim;
         else zone = MoveZone.Sprint;
 
         ui?.SetArrowInput(dirScreenSm, Mathf.Min(radiusPxSm, outerPx));
@@ -294,28 +265,22 @@ public class MovementControllerRB : MonoBehaviour
 
     private void UpdateIntentAndCarrot()
     {
-        centerWorld = GetCenterWorld();
-
         if (isDragging && inputCamera != null)
         {
             worldDir = ScreenDirToWorldXZ(dirScreenSm, inputCamera.transform);
-            if (worldDir.sqrMagnitude < 1e-6f) worldDir = transform.forward;
             worldDir.y = 0f;
-            worldDir = worldDir.sqrMagnitude > 1e-6f ? worldDir.normalized : Vector3.forward;
+            if (worldDir.sqrMagnitude > 1e-6f) worldDir.Normalize();
+            else worldDir = Vector3.forward;
         }
 
-        // Push facing samples every frame so FixedUpdate can query delayed direction.
-        PushFacingDelaySample(isDragging ? worldDir : transform.forward);
-
-        // Discrete target speed by zone (no ramp).
         if (!isDragging) targetSpeed = 0f;
         else
         {
             targetSpeed = zone switch
             {
                 MoveZone.Aim => 0f,
-                MoveZone.Swim => swimSpeed,
-                MoveZone.Sprint => sprintSpeed,
+                MoveZone.Swim => swimAvgSpeed,
+                MoveZone.Sprint => sprintTargetSpeed,
                 _ => 0f
             };
         }
@@ -325,357 +290,179 @@ public class MovementControllerRB : MonoBehaviour
             MoveZone.Aim => carrotRadiusAim,
             MoveZone.Swim => carrotRadiusSwim,
             MoveZone.Sprint => carrotRadiusSprint,
-            _ => carrotRadiusAim
+            _ => carrotRadiusSwim
         };
 
-        carrotWorld = centerWorld + worldDir * carrotR;
+        Vector3 center = (rb != null) ? rb.position : transform.position;
+        center.y = PlaneY;
+        carrotWorld = center + worldDir * carrotR;
         carrotWorld.y = PlaneY;
     }
 
-    private Vector3 GetCenterWorld()
+    // ---------------- Turning delay ----------------
+
+    private void UpdateSteerDir(float dt)
     {
-        Vector3 pos = (rb != null) ? rb.position : transform.position;
-        pos.y = PlaneY;
-        return pos;
+        // No propulsion intent => keep steerDir stable (don’t snap around)
+        if (!isDragging) return;
+
+        Vector3 desired = worldDir;
+        desired.y = 0f;
+        if (desired.sqrMagnitude < 1e-6f) return;
+        desired.Normalize();
+
+        float speed = GetSpeed(); // current otter’s rigidbody speed
+
+        float t = Mathf.InverseLerp(
+            turnRateSpeedStart,
+            swimAvgSpeed,   // reference swim speed
+            speed
+        );
+        t = Mathf.Clamp01(t);
+        t = t * t * (3f - 2f * t); // smoothstep
+
+        float dynamicTurnRate =
+            Mathf.Lerp(turnRateIdle, turnRateSwim, t);
+
+        float maxRad = Mathf.Deg2Rad * dynamicTurnRate * Mathf.Max(1e-5f, dt);
+        steerDir = Vector3.RotateTowards(steerDir, desired, maxRad, 0f);
+        steerDir.y = 0f;
+        if (steerDir.sqrMagnitude > 1e-6f) steerDir.Normalize();
     }
 
-    // ---------------- Facing (root yaw) ----------------
+    // ---------------- Facing ----------------
 
-    private void UpdateFacingRigidbody()
+    private void UpdateFacing()
     {
         if (rb == null) return;
         if (faceSmoothing <= 0f) return;
         if (!isDragging) return;
 
-        Vector3 dir = GetDelayedFacingDir(worldDir);
+        // Face along steerDir (matches propulsion direction inertia)
+        Vector3 dir = steerDir;
         dir.y = 0f;
         if (dir.sqrMagnitude < 1e-6f) return;
         dir.Normalize();
 
         Quaternion target = Quaternion.LookRotation(dir, Vector3.up);
         float k = 1f - Mathf.Exp(-faceSmoothing * Time.fixedDeltaTime);
-        Quaternion next = Quaternion.Slerp(rb.rotation, target, k);
-        rb.MoveRotation(next);
+        rb.MoveRotation(Quaternion.Slerp(rb.rotation, target, k));
     }
 
-    // ---------------- Turn-speed coupling ----------------
+    // ---------------- Rhythm + Propulsion (no frequency settings) ----------------
 
-    private void UpdateTurnSpeedFactor()
-    {
-        float dt = Mathf.Max(1e-5f, Time.fixedDeltaTime);
-
-        // No intent (or Aim) => recover to 1.
-        if (!isDragging || targetSpeed <= 1e-4f)
-        {
-            float k0 = 1f - Mathf.Exp(-Mathf.Max(0f, turnSlowdownSmoothing) * dt);
-            turnSpeedFactor = Mathf.Lerp(turnSpeedFactor, 1f, k0);
-            return;
-        }
-
-        Vector3 flatForward = transform.forward;
-        flatForward.y = 0f;
-        Vector3 flatDir = worldDir;
-        flatDir.y = 0f;
-
-        if (flatForward.sqrMagnitude < 1e-6f || flatDir.sqrMagnitude < 1e-6f)
-        {
-            float kBad = 1f - Mathf.Exp(-Mathf.Max(0f, turnSlowdownSmoothing) * dt);
-            turnSpeedFactor = Mathf.Lerp(turnSpeedFactor, 1f, kBad);
-            return;
-        }
-
-        flatForward.Normalize();
-        flatDir.Normalize();
-
-        float angle = Vector3.Angle(flatForward, flatDir);
-        float t = Mathf.InverseLerp(
-            Mathf.Max(0f, turnSlowdownStartAngle),
-            Mathf.Max(turnSlowdownStartAngle + 0.001f, turnSlowdownMaxAngle),
-            angle
-        );
-
-        float targetFactor = Mathf.Lerp(1f, Mathf.Clamp01(minTurnSpeedFactor), t);
-        float k = 1f - Mathf.Exp(-Mathf.Max(0f, turnSlowdownSmoothing) * dt);
-        turnSpeedFactor = Mathf.Lerp(turnSpeedFactor, targetFactor, k);
-    }
-
-    // ---------------- Facing delay helpers ----------------
-
-    private void InitFacingDelayBuffer()
-    {
-        int n = Mathf.Max(8, faceDelayBufferSize);
-        faceTimeBuf = new float[n];
-        faceDirBuf = new Vector3[n];
-        faceBufHead = 0;
-        faceBufCount = 0;
-    }
-
-    private void ClearFacingDelayBuffer()
-    {
-        faceBufHead = 0;
-        faceBufCount = 0;
-    }
-
-    private void PushFacingDelaySample(Vector3 dir)
-    {
-        if (faceTimeBuf == null || faceDirBuf == null || faceTimeBuf.Length == 0)
-            InitFacingDelayBuffer();
-
-        dir.y = 0f;
-        if (dir.sqrMagnitude < 1e-6f) dir = Vector3.forward;
-        dir.Normalize();
-
-        faceTimeBuf[faceBufHead] = Time.time;
-        faceDirBuf[faceBufHead] = dir;
-
-        faceBufHead = (faceBufHead + 1) % faceTimeBuf.Length;
-        faceBufCount = Mathf.Min(faceBufCount + 1, faceTimeBuf.Length);
-    }
-
-    private Vector3 GetDelayedFacingDir(Vector3 fallback)
-    {
-        float delay = Mathf.Max(0f, faceDelaySeconds);
-        if (delay <= 1e-5f || faceBufCount <= 0) return fallback;
-
-        float targetTime = Time.time - delay;
-
-        // Search backward from newest sample.
-        int newestIndex = (faceBufHead - 1 + faceTimeBuf.Length) % faceTimeBuf.Length;
-        int idx = newestIndex;
-
-        for (int i = 0; i < faceBufCount; i++)
-        {
-            float t = faceTimeBuf[idx];
-            if (t <= targetTime)
-                return faceDirBuf[idx];
-
-            idx = (idx - 1 + faceTimeBuf.Length) % faceTimeBuf.Length;
-        }
-
-        // Not enough history yet -> return oldest we have (max available delay).
-        int oldestIndex = (faceBufHead - faceBufCount + faceTimeBuf.Length) % faceTimeBuf.Length;
-        return faceDirBuf[oldestIndex];
-    }
-
-    // ---------------- Propulsion ----------------
-
-    private void ApplyPulsePropulsion()
+    private void StepRhythm(float dt)
     {
         if (rb == null) return;
 
-        // Estimate along-intent acceleration/deceleration for cruise.
-        float dt = Mathf.Max(1e-5f, Time.fixedDeltaTime);
-        float vProj = Vector3.Dot(GetVelocity(), worldDir);
-        float dvProjDt = (vProj - prevVProj) / dt;
-        prevVProj = vProj;
-        // Smooth a bit so we don't chase noise.
-        float smoothK = 1f - Mathf.Exp(-10f * dt);
-        dvProjDtSmoothed = Mathf.Lerp(dvProjDtSmoothed, dvProjDt, smoothK);
-
-        // No intent or Aim => no kicks.
-        float desiredTarget = propulsionOverride ? overrideTargetSpeed : targetSpeed;
-
-        // Reduce requested speed while turning (more turn = more slow down).
-        // This keeps "high speed + instant sharp yaw" from feeling unnatural.
-        desiredTarget *= Mathf.Clamp01(turnSpeedFactor);
-        if (!isDragging || desiredTarget <= 1e-4f)
+        // No intent or Aim => no kicks; let drag/brake handle it.
+        if (!isDragging || targetSpeed <= 1e-4f)
         {
             lastKickRate = 0f;
             lastKickImpulse = 0f;
-            // let timer decay toward 0 so next kick doesn't happen instantly
-            kickTimer = Mathf.Max(0f, kickTimer - dt);
+            phaseRemain = Mathf.Max(0f, phaseRemain - dt);
             return;
         }
 
-        bool inSprint = (zone == MoveZone.Sprint);
+        // Demand from speed deficit along steerDir
+        float vAlong = Vector3.Dot(GetVelocity(), steerDir);
+        float dv = targetSpeed - vAlong;
+        if (dv < 0f) dv = 0f;
 
-        float rateMax = propulsionOverride ? overrideKickRateMax : (inSprint ? kickRateMaxSprint : kickRateMaxSwim);
-        float impMax = propulsionOverride ? overrideImpulseMax : (inSprint ? impulseMaxSprint : impulseMaxSwim);
-        rateMax = Mathf.Max(0f, rateMax);
-        impMax = Mathf.Max(0f, impMax);
-        if (rateMax <= 1e-4f || impMax <= 1e-4f)
-        {
-            lastKickRate = 0f;
-            lastKickImpulse = 0f;
-            kickTimer = Mathf.Max(0f, kickTimer - dt);
-            return;
-        }
+        demand01 = Mathf.Clamp01(dv / Mathf.Max(0.01f, demandDvRef));
 
-        float dv = desiredTarget - vProj;
+        bool sprint = (zone == MoveZone.Sprint);
 
-        // If we're above target by a bit, just coast (let water slow us down).
-        if (dv < -Mathf.Max(0f, overSpeedDeadband))
-        {
-            lastKickRate = 0f;
-            lastKickImpulse = 0f;
-            kickTimer = Mathf.Max(0f, kickTimer - dt);
-            return;
-        }
+        float Kmin = Mathf.Max(0.02f, sprint ? sprintKMin : swimKMin);
+        float Kmax = Mathf.Max(Kmin, sprint ? sprintKMax : swimKMax);
 
-        float mass = Mathf.Max(0.01f, rb.mass);
+        float Imin = Mathf.Max(0.01f, sprint ? sprintIMin : swimIMin);
+        float Imax = Mathf.Max(Imin, sprint ? sprintIMax : swimIMax);
 
-        // Decide whether we're in cruise.
-        bool inCruise = dv <= Mathf.Max(0.02f, cruiseEnterDv);
+        // Higher demand => shorter K and I (more frequent and faster kicks)
+        K = Mathf.Lerp(Kmax, Kmin, demand01);
+        I = Mathf.Lerp(Imax, Imin, demand01);
 
-        float desiredRate;
-        float desiredImpulse;
+        // Split K into prepare/kick by ratio R
+        float R = Mathf.Max(0.01f, kickToPrepareRatioR);
+        prepareTime = K / (1f + R);
+        kickTime = K - prepareTime; // == K*R/(1+R)
 
-        if (!inCruise)
-        {
-            // ACCEL PHASE: close the gap toward target over the configured accel time-scale.
-            float accelTime = inSprint ? sprintAccelTime : swimAccelTime;
-            accelTime = Mathf.Max(0.05f, accelTime);
+        // Impulse grows with demand (and indirectly with shorter K/I)
+        float impMin = sprint ? sprintImpulseMin : swimImpulseMin;
+        float impMax = sprint ? sprintImpulseMax : swimImpulseMax;
+        float g = Mathf.Max(0.1f, impulseGamma);
+        impulse = Mathf.Lerp(impMin, impMax, Mathf.Pow(demand01, g));
 
-            float aReq = Mathf.Max(0f, dv) / accelTime;      // m/s^2
-            float impulsePerSecondReq = mass * aReq;         // N*s per s
+        // Derived cadence for telemetry only (NOT a setting)
+        float T = Mathf.Max(1e-3f, K + I);
+        float cadenceHz = 1f / T;
 
-            // Prefer fairly frequent kicks in accel (still "kick-y" but not tractor).
-            float accelRateMin = inSprint ? Mathf.Min(3.0f, rateMax) : Mathf.Min(2.4f, rateMax);
-
-            // Choose rate based on how hard we need to work.
-            // If we need a lot of impulse/s, push toward rateMax.
-            float work01 = Mathf.Clamp01(impulsePerSecondReq / Mathf.Max(1e-6f, rateMax * impMax));
-            desiredRate = Mathf.Lerp(accelRateMin, rateMax, Mathf.Sqrt(work01));
-            desiredRate = Mathf.Clamp(desiredRate, accelRateMin, rateMax);
-
-            // Choose impulse to meet impulse/s budget at that rate.
-            desiredImpulse = impulsePerSecondReq / Mathf.Max(1e-3f, desiredRate);
-            desiredImpulse = Mathf.Clamp(desiredImpulse, cruiseImpulseMin, impMax);
-
-            // Saturation: if even at max rate and max impulse we can't meet demand, we just saturate.
-            if (impulsePerSecondReq > rateMax * impMax)
-            {
-                desiredRate = rateMax;
-                desiredImpulse = impMax;
-            }
-        }
-        else
-        {
-            // CRUISE PHASE: estimate how much impulse/s is needed to cancel the observed deceleration
-            // along the intent direction (drag + current).
-            // If dvProjDtSmoothed is negative, we are losing speed along intent.
-            float aNeed = Mathf.Max(0f, -dvProjDtSmoothed);
-            float impulsePerSecondNeed = mass * aNeed;
-
-            float rateMin = inSprint ? cruiseKickRateMinSprint : cruiseKickRateMinSwim;
-            rateMin = Mathf.Clamp(rateMin, 0.1f, rateMax);
-
-            if (impulsePerSecondNeed <= 1e-4f)
-            {
-                // No observed decel: we can coast.
-                // Keep a gentle periodic kick only if we're slightly below target.
-                if (dv > 0.02f)
-                {
-                    desiredRate = rateMin;
-                    desiredImpulse = Mathf.Clamp((mass * dv) * 0.15f, cruiseImpulseMin, impMax);
-                }
-                else
-                {
-                    desiredRate = 0f;
-                    desiredImpulse = 0f;
-                }
-            }
-            else
-            {
-                // Prefer to maintain at least rateMin for smoothness.
-                float impulseAtRateMin = impulsePerSecondNeed / Mathf.Max(1e-3f, rateMin);
-
-                if (impulseAtRateMin <= impMax)
-                {
-                    desiredRate = rateMin;
-                    desiredImpulse = Mathf.Clamp(impulseAtRateMin, cruiseImpulseMin, impMax);
-                }
-                else
-                {
-                    // Need more than impMax at rateMin => raise rate until impulse <= impMax.
-                    float rateNeededAtImpMax = impulsePerSecondNeed / Mathf.Max(1e-3f, impMax);
-                    if (rateNeededAtImpMax <= rateMax)
-                    {
-                        desiredRate = Mathf.Max(rateMin, rateNeededAtImpMax);
-                        desiredImpulse = impMax;
-                    }
-                    else
-                    {
-                        // Even at max rate and max impulse we can't maintain. Saturate and allow slowdown.
-                        desiredRate = rateMax;
-                        desiredImpulse = impMax;
-                    }
-                }
-
-                // If we are still below target a bit, add a tiny proportional term.
-                if (dv > 0.02f)
-                {
-                    float boost = Mathf.Clamp((mass * dv) * 0.08f, 0f, impMax - desiredImpulse);
-                    desiredImpulse = Mathf.Clamp(desiredImpulse + boost, cruiseImpulseMin, impMax);
-                }
-            }
-        }
-
-        lastKickRate = desiredRate;
-        lastKickImpulse = desiredImpulse;
-
-        // Schedule kicks.
-        if (desiredRate <= 1e-4f || desiredImpulse <= 1e-5f)
-        {
-            kickTimer = Mathf.Max(0f, kickTimer - dt);
-            return;
-        }
-
-        kickTimer -= dt;
+        // Phase machine
+        phaseRemain -= dt;
         int guard = 0;
-        float interval = 1f / Mathf.Max(0.05f, desiredRate);
-
-        while (kickTimer <= 0f && guard < 3)
+        while (phaseRemain <= 0f && guard++ < 4)
         {
-            // Fire animation immediately but defer the physical force for better sync.
-            OnKickImpulse?.Invoke();
-            OnKickImpulseDetailed?.Invoke(desiredImpulse, desiredRate);
-
-            pendingKicks.Add(new PendingKick
+            switch (phase)
             {
-                timeRemaining = Mathf.Max(0f, kickForceDelay),
-                dir = worldDir,
-                impulse = desiredImpulse
-            });
+                case Phase.Prepare:
+                    phase = Phase.Kick;
+                    phaseRemain += Mathf.Max(0.01f, kickTime);
 
-            // slight timing jitter keeps it from feeling robotic
-            // Explicitly use Unity's RNG to avoid ambiguity with System.Random
-            float jitter = UnityEngine.Random.Range(0.92f, 1.08f);
-            kickTimer += interval * jitter;
-            guard++;
+                    // Apply impulse at the START of Kick phase
+                    rb.AddForce(steerDir * impulse, ForceMode.Impulse);
+
+                    lastKickRate = cadenceHz;
+                    lastKickImpulse = impulse;
+
+                    // Predict next kick moment (after kick + interval + next prepare)
+                    nextKickTime = Time.time + kickTime + I + prepareTime;
+                    break;
+
+                case Phase.Kick:
+                    phase = Phase.Interval;
+                    phaseRemain += Mathf.Max(0.01f, I);
+
+                    // Next kick after interval + prepare
+                    nextKickTime = Time.time + I + prepareTime;
+                    break;
+
+                case Phase.Interval:
+                default:
+                    phase = Phase.Prepare;
+                    phaseRemain += Mathf.Max(0.01f, prepareTime);
+
+                    // >>> Your desired moment: Interval -> Prepare (cycle start)
+                    EmitKickCycleStart();
+
+                    // Next kick when prepare ends
+                    nextKickTime = Time.time + prepareTime;
+                    break;
+            }
+        }
+
+        // Keep nextKickTime valid even mid-phase
+        if (nextKickTime < Time.time)
+        {
+            float toKick =
+                phase == Phase.Prepare ? Mathf.Max(0f, phaseRemain) :
+                phase == Phase.Kick ? 0f :
+                Mathf.Max(0f, phaseRemain + prepareTime);
+
+            nextKickTime = Time.time + toKick;
         }
     }
 
-    private void ProcessPendingKicks()
-    {
-        if (pendingKicks.Count == 0 || rb == null) return;
-
-        float dt = Mathf.Max(1e-5f, Time.fixedDeltaTime);
-        for (int i = pendingKicks.Count - 1; i >= 0; i--)
-        {
-            PendingKick pk = pendingKicks[i];
-            pk.timeRemaining -= dt;
-            if (pk.timeRemaining <= 0f)
-            {
-                rb.AddForce(pk.dir * pk.impulse, ForceMode.Impulse);
-                pendingKicks.RemoveAt(i);
-            }
-            else
-            {
-                pendingKicks[i] = pk;
-            }
-        }
-    }
+    // ---------------- Stop / plane lock ----------------
 
     private void ApplyIdleBrakeAndPlaneLock()
     {
         if (rb == null) return;
 
-        // Lock plane Y.
         if (useFixedPlaneY)
         {
             Vector3 vel = rb.velocity;
-            if (Mathf.Abs(vel.y) > 1e-4f) vel.y = 0f;
+            vel.y = 0f;
             rb.velocity = vel;
 
             Vector3 pos = rb.position;
@@ -686,11 +473,10 @@ public class MovementControllerRB : MonoBehaviour
             }
         }
 
-        // Fast stop when no intent.
         bool hasIntent = isDragging && targetSpeed > 1e-4f;
         if (hasIntent) return;
 
-        Vector3 v = GetVelocity();
+        Vector3 v = rb.velocity; v.y = 0f;
         float spd = v.magnitude;
 
         if (spd < stopSpeedEpsilon)
@@ -706,59 +492,92 @@ public class MovementControllerRB : MonoBehaviour
         rb.AddForce(a, ForceMode.Acceleration);
     }
 
-    private void UpdateAccelerationTelemetry()
-    {
-        if (rb == null)
-        {
-            accelH = Vector3.zero;
-            prevVelH = Vector3.zero;
-            return;
-        }
-
-        Vector3 v = rb.velocity;
-        v.y = 0f;
-
-        float dt = Mathf.Max(1e-5f, Time.fixedDeltaTime);
-        accelH = (v - prevVelH) / dt;
-        prevVelH = v;
-    }
+    // ---------------- Gizmos (kick preview points to REAR) ----------------
 
     private void OnDrawGizmos()
     {
         if (!drawGizmos) return;
+        if (!Application.isPlaying) return;
 
-        Vector3 origin = Application.isPlaying ? GetCenterWorld() : transform.position;
-        origin.y = Application.isPlaying ? PlaneY : origin.y;
+        // Only show when we have propulsion intent
+        if (!isDragging || targetSpeed <= 1e-4f) return;
 
-        // Intent
-        Gizmos.color = new Color(0.2f, 0.6f, 1f, 1f);
-        Gizmos.DrawLine(origin, origin + worldDir * gizmoIntentScale);
+        float lead = Mathf.Max(0f, preKickGizmoLead);
+        if (lead <= 1e-4f) return;
 
-        // Carrot
-        Gizmos.color = Color.yellow;
-        Gizmos.DrawLine(origin, carrotWorld);
-        Gizmos.DrawSphere(carrotWorld, 0.06f);
+        float t = Time.time;
+        if (t < nextKickTime - lead || t > nextKickTime) return;
 
-        if (rb != null)
-        {
-            // Velocity
-            Gizmos.color = Color.green;
-            Vector3 hv = rb.velocity; hv.y = 0f;
-            Gizmos.DrawLine(origin, origin + hv * gizmoVelScale);
+        Vector3 origin = (rb != null ? rb.position : transform.position);
+        origin.y = PlaneY;
 
-            // Acceleration
-            Gizmos.color = new Color(1f, 0.5f, 0.1f, 1f);
-            Gizmos.DrawLine(origin, origin + accelH * gizmoAccelScale);
-        }
+        // Rear direction uses actual facing (transform.forward) for intuitive "push water backward" preview
+        Vector3 fwd = transform.forward;
+        fwd.y = 0f;
+        if (fwd.sqrMagnitude < 1e-6f) fwd = steerDir;
+        fwd.y = 0f;
+        if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
+        fwd.Normalize();
+
+        Vector3 rearDir = -fwd;
+
+        // Offset sideways to avoid overlapping your UI arrow
+        Vector3 right = Vector3.Cross(Vector3.up, fwd);
+        if (right.sqrMagnitude > 1e-6f) right.Normalize();
+
+        Vector3 o = origin + Vector3.up * kickVizUpOffset + right * kickVizSideOffset;
+
+        // Pulse as we approach kick moment (more visible)
+        float phase01 = Mathf.InverseLerp(nextKickTime - lead, nextKickTime, t);
+        float alpha = Mathf.Lerp(0.20f, 1.0f, phase01 * phase01);
+
+        // Length scales with demand (developer-set range)
+        float lenMin = Mathf.Max(0.05f, kickVizLenMin);
+        float lenMax = Mathf.Max(lenMin, kickVizLenMax);
+        float len = Mathf.Lerp(lenMin, lenMax, Mathf.Clamp01(demand01));
+
+        Gizmos.color = new Color(1f, 0.25f, 0.15f, alpha);
+        Gizmos.DrawLine(o, o + rearDir * len);
+        Gizmos.DrawSphere(o + rearDir * len, 0.10f);
+        Gizmos.DrawWireSphere(o, 0.10f);
     }
 
-    // ---------------- Public API (used by other scripts) ----------------
+    // ---------------- Kick cycle event ----------------
+
+    public struct KickCycleEvent
+    {
+        // Total time for one leg cycle motion: Prepare + Kick
+        public float cycleDuration;
+
+        // Next interval (optional, for anticipation / blending)
+        public float intervalDuration;
+
+        // Optional scaling so legs can modulate amplitude
+        public float demand01;
+    }
+
+    public event System.Action<KickCycleEvent> OnKickCycleStart;
+
+    private void EmitKickCycleStart()
+    {
+        if (OnKickCycleStart == null) return;
+
+        OnKickCycleStart.Invoke(new KickCycleEvent
+        {
+            cycleDuration    = Mathf.Max(1e-4f, prepareTime + kickTime),
+            intervalDuration = Mathf.Max(0f, I),
+            demand01         = Mathf.Clamp01(demand01),
+        });
+    }
+
+    // ---------------- Public API (compat) ----------------
 
     public bool IsDragging() => isDragging;
     public MoveZone GetZone() => zone;
 
     public Vector3 GetCarrotWorld() => carrotWorld;
     public Vector3 GetWorldDir() => worldDir;
+    public Vector3 GetSteerDir() => steerDir;
 
     public Vector3 GetVelocity()
     {
@@ -768,54 +587,26 @@ public class MovementControllerRB : MonoBehaviour
         return v;
     }
 
-    public Vector3 GetAcceleration()
-    {
-        Vector3 a = accelH;
-        a.y = 0f;
-        return a;
-    }
-
     public float GetSpeed() => GetVelocity().magnitude;
 
     public float GetSpeedAlongIntent()
     {
         Vector3 v = GetVelocity();
-        return Vector3.Dot(v, worldDir);
+        return Vector3.Dot(v, steerDir);
     }
 
     public float GetTargetSpeed() => targetSpeed;
-    public float GetSwimSpeed() => swimSpeed;
-    public float GetSprintSpeed() => sprintSpeed;
+    public float GetSwimSpeed() => swimAvgSpeed;
+    public float GetSprintSpeed() => sprintTargetSpeed;
 
-    // For debugging / telemetry
+    // Derived telemetry (NOT settings)
     public float GetLastKickRate() => lastKickRate;
     public float GetLastKickImpulse() => lastKickImpulse;
 
-    /// <summary>
-    /// Approximate along-intent deceleration (m/s^2) observed at runtime. Positive means slowing down.
-    /// </summary>
-    public float GetObservedDecelAlongIntent() => Mathf.Max(0f, -dvProjDtSmoothed);
-
-    // ---------------- Compatibility hooks for state controller / specials ----------------
-
-    /// <summary>
-    /// Optional override for transitions/special states.
-    /// - targetSpeedOverride: if >= 0 uses that instead of computed targetSpeed.
-    /// - kickRateMaxOverride / impulseMaxOverride: if > 0 clamp maxima.
-    /// </summary>
-    public void SetPropulsionOverride(float targetSpeedOverride, float kickRateMaxOverride, float impulseMaxOverride)
-    {
-        propulsionOverride = true;
-        overrideTargetSpeed = Mathf.Max(0f, targetSpeedOverride);
-        overrideKickRateMax = Mathf.Max(0f, kickRateMaxOverride);
-        overrideImpulseMax = Mathf.Max(0f, impulseMaxOverride);
-    }
-
-    public void ClearPropulsionOverride()
-    {
-        propulsionOverride = false;
-        overrideTargetSpeed = 0f;
-        overrideKickRateMax = 0f;
-        overrideImpulseMax = 0f;
-    }
+    // Optional debug getters
+    public float GetDemand01() => demand01;
+    public float GetK() => K;
+    public float GetI() => I;
+    public float GetPrepareTime() => prepareTime;
+    public float GetKickTime() => kickTime;
 }
