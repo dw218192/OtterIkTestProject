@@ -95,9 +95,31 @@ public class HindPaddleDebugVisualizerRB : MonoBehaviour
 
         if (drawIkTargets && leg.ikTarget != null)
         {
-            Gizmos.color = isLeft
-                ? new Color(0.2f, 1.0f, 0.35f, 0.95f)
-                : new Color(0.2f, 0.6f, 1.00f, 0.95f);
+            // Distinguish inner vs outer leg during turns for target sphere color
+            trajectory.GetTurnContext(
+                out _,
+                out _,
+                out _,
+                out float turnSign,
+                out float turnAmount01
+            );
+
+            bool hasTurn = turnAmount01 > 0.05f && Mathf.Abs(turnSign) > 0.5f;
+            float legSideSign = isLeft ? -1f : 1f;
+            bool isInner = hasTurn && Mathf.Sign(legSideSign) == Mathf.Sign(turnSign);
+
+            if (!hasTurn)
+            {
+                // Straight / no turn: unify both legs to yellow
+                Gizmos.color = new Color(1.0f, 0.9f, 0.2f, 0.95f);
+            }
+            else
+            {
+                // Turning: color by inner/outer leg
+                Gizmos.color = isInner
+                    ? new Color(1.0f, 0.25f, 0.25f, 1.0f)   // inner leg
+                    : new Color(0.2f, 0.7f, 1.0f, 0.95f);   // outer leg
+            }
 
             Gizmos.DrawSphere(leg.ikTarget.position, ikRadius);
             Gizmos.DrawLine(restW, leg.ikTarget.position);
