@@ -95,18 +95,28 @@ public class HindPaddleDebugVisualizerRB : MonoBehaviour
 
         if (drawIkTargets && leg.ikTarget != null)
         {
-            // Distinguish inner vs outer leg during turns for target sphere color
-            trajectory.GetTurnContext(
-                out _,
-                out _,
-                out _,
-                out float turnSign,
-                out float turnAmount01
-            );
+            // Distinguish inner vs outer leg during turns for target sphere color (WORLD UP, verified)
+            bool hasTurn = false;
+            bool isInner = false;
 
-            bool hasTurn = turnAmount01 > 0.05f && Mathf.Abs(turnSign) > 0.5f;
-            float legSideSign = isLeft ? -1f : 1f;
-            bool isInner = hasTurn && Mathf.Sign(legSideSign) == Mathf.Sign(turnSign);
+            if (trajectory != null &&
+                trajectory.spineChain != null && trajectory.spineChain.Length >= 3 &&
+                trajectory.leftLeg != null && trajectory.leftLeg.legRootBone != null &&
+                trajectory.rightLeg != null && trajectory.rightLeg.legRootBone != null)
+            {
+                float planeY = (trajectory.rootSpace != null) ? trajectory.rootSpace.position.y : transform.position.y;
+
+                var res = SpineCurveInnerOuterWorldUp.Evaluate(
+                    trajectory.spineChain,
+                    trajectory.leftLeg.legRootBone,
+                    trajectory.rightLeg.legRootBone,
+                    planeY
+                );
+
+                hasTurn = res.hasTurn;
+                if (hasTurn)
+                    isInner = isLeft ? res.leftIsInner : !res.leftIsInner;
+            }
 
             if (!hasTurn)
             {

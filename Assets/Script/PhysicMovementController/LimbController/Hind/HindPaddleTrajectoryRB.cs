@@ -10,11 +10,14 @@ using UnityEngine;
 /// Features:
 /// - Minimal required params: restAngleDeg, forwardRadius, sideRadius, clockwise, tiltOutward, trajectoryTiltDeg.
 /// - Two legs for stable left/right sign.
-/// - Turn inner/outer detection from spine curve (first/mid/last) in the hip-defined plane.
 /// - Turn-aware kick direction: outer kicks outward, inner kicks inward (turnKickYawDeg).
 /// - Turn lateral offset relative to kick direction (turnLateralOffsetMeters).
-/// - NEW: trajectoryTiltDeg is mirrored per leg (not identical), so both legs tilt "down" or "up" together visually.
+/// - trajectoryTiltDeg is mirrored per leg (not identical), so both legs tilt "down" or "up" together visually.
 ///   Implementation: signedTilt = trajectoryTiltDeg * legSideSign (left=-1, right=+1).
+///
+/// IMPORTANT CHANGE:
+/// - Inner/Outer leg classification uses SpineCurveInnerOuterWorldUp (WORLD UP), verified by standalone test.
+///   This avoids sign/axis convention issues that caused flipped inner/outer previously.
 ///
 /// API compatibility:
 /// - EvaluateKickLocal(...)
@@ -84,6 +87,12 @@ public class HindPaddleTrajectoryRB : MonoBehaviour
     [Tooltip("Outer leg yaws outward and inner leg yaws inward by this degrees * turnAmount01.")]
     [Range(0f, 90f)]
     public float turnKickYawDeg = 25f;
+
+    [Tooltip("INNER leg yaw multiplier when turning. 1=default, >1 stronger, <1 weaker.")]
+    [Range(0f, 3f)] public float innerYawAmplifier = 1.0f;
+
+    [Tooltip("OUTER leg yaw multiplier when turning. 1=default, >1 stronger, <1 weaker.")]
+    [Range(0f, 3f)] public float outerYawAmplifier = 1.0f;
 
     [Tooltip("Spine bend angle (deg) that maps to turnAmount01 = 1.")]
     public float bendAngleForFullTurnDeg = 25f;
@@ -177,26 +186,69 @@ public class HindPaddleTrajectoryRB : MonoBehaviour
     {
         BuildBaseFrame(out Vector3 up, out Vector3 baseForward, out Vector3 baseSide);
 
-        float legSideSign = GetLegSideSign(binding, up, baseSide); // left=-1, right=+1 (relative to hip side axis)
+        float legSideSign = GetLegSideSign(binding, up, baseSide); // left=-1, right=+1
 
         // Horizontal outward direction (purely left/right), affected by tiltOutward.
-        // This controls "left goes left, right goes right" behavior.
         float outwardSign = tiltOutward ? legSideSign : -legSideSign;
 
-        // Turn info from spine curve
+        // Turn info from spine curve (kept: used for yaw direction/magnitude)
         ComputeTurnFromSpine(up, out float turnSign, out float turn01);
-        bool hasTurn = turn01 > 0.02f && Mathf.Abs(turnSign) > 0.5f;
+        bool hasTurnYaw = turn01 > 0.02f && Mathf.Abs(turnSign) > 0.5f;
 
-        // Inner/Outer: inner is on the turning side
-        bool isInner = hasTurn && (Mathf.Sign(outwardSign) == Mathf.Sign(turnSign));
-        bool isOuter = hasTurn && !isInner;
+        // Inner/Outer (WORLD UP, verified by standalone test):
+        // Use SpineCurveInnerOuterWorldUp to avoid sign/axis conventions.
+        bool isInner = false;
+        bool isOuter = false;
+
+        bool hasTurn = false;
+        if (hasTurnYaw &&
+            spineChain != null && spineChain.Length >= 3 &&
+            leftLeg != null && leftLeg.legRootBone != null &&
+            rightLeg != null && rightLeg.legRootBone != null)
+        {
+            float planeY = rootSpace != null ? rootSpace.position.y : transform.position.y;
+            var res = SpineCurveInnerOuterWorldUp.Evaluate(
+                spineChain,
+                leftLeg.legRootBone,
+                rightLeg.legRootBone,
+                planeY
+            );
+
+            hasTurn = res.hasTurn;
+
+            bool bindingIsLeft = binding != null && binding.legRootBone == leftLeg.legRootBone;
+            bool bindingIsRight = binding != null && binding.legRootBone == rightLeg.legRootBone;
+
+            if (hasTurn)
+            {
+                if (bindingIsLeft) isInner = res.leftIsInner;
+                else if (bindingIsRight) isInner = !res.leftIsInner;
+                else
+                {
+                    // Unknown binding: fallback to old sign logic
+                    isInner = (Mathf.Sign(outwardSign) == Mathf.Sign(turnSign));
+                }
+
+                isOuter = !isInner;
+            }
+        }
+
+        if (!hasTurn)
+        {
+            // Fallback: keep behavior reasonable if spine is near-straight or refs are missing.
+            hasTurn = hasTurnYaw;
+            isInner = hasTurn && (Mathf.Sign(outwardSign) == Mathf.Sign(turnSign));
+            isOuter = hasTurn && !isInner;
+        }
 
         // Kick direction: base forward + turn yaw (outer outward, inner inward)
         Vector3 kickDir = baseForward;
         if (hasTurn && turnKickYawDeg > 0.001f)
         {
-            float yaw = turnKickYawDeg * turn01;
-            float signedYaw = isOuter ? (+yaw * turnSign) : (-yaw * turnSign);
+            float amp = isOuter ? outerYawAmplifier : innerYawAmplifier;
+            float yaw = turnKickYawDeg * turn01 * Mathf.Max(0f, amp);
+
+            float signedYaw = isOuter ? (-yaw * turnSign) : (+yaw * turnSign);
             kickDir = Quaternion.AngleAxis(signedYaw, up) * baseForward;
             kickDir.Normalize();
         }
@@ -207,9 +259,7 @@ public class HindPaddleTrajectoryRB : MonoBehaviour
         // Per-leg side direction (outward) in kick frame
         Vector3 legSideDir = sideOfKick * outwardSign;
 
-        // IMPORTANT: mirrored tilt per leg (prevents one-up/one-down)
-        // Use legSideSign (not outwardSign) so tilt remains a true left/right mirror,
-        // independent of whether tiltOutward is enabled.
+        // Mirrored tilt per leg (prevents one-up/one-down)
         float signedTiltDeg = trajectoryTiltDeg * legSideSign;
         if (Mathf.Abs(signedTiltDeg) > 1e-4f)
         {
@@ -226,13 +276,13 @@ public class HindPaddleTrajectoryRB : MonoBehaviour
             lateral = s * turnLateralOffsetMeters * turn01;
         }
 
-        // Demand amplitude (kept simple)
+        // Demand amplitude
         float ampMul = Mathf.Lerp(1f, amplitudeMultiplierAtFullDemand, demand01);
         float aF = forwardRadius * ampMul;
         float aS = sideRadius * ampMul;
 
         float thetaRest = Mathf.Deg2Rad * restAngleDeg;
-        float dir = clockwise ? -1f : +1f; // +sin standard is CCW; clockwise flips sign
+        float dir = clockwise ? -1f : +1f;
         float theta = thetaRest + dir * (phase01 * Mathf.PI * 2f);
 
         Vector3 E(float ang)
@@ -256,7 +306,6 @@ public class HindPaddleTrajectoryRB : MonoBehaviour
         f = Vector3.ProjectOnPlane(f, up);
         if (f.sqrMagnitude < 1e-8f)
         {
-            // fallback
             Vector3 rf = t.forward;
             f = Vector3.ProjectOnPlane(rf, up);
         }
@@ -290,8 +339,6 @@ public class HindPaddleTrajectoryRB : MonoBehaviour
             return +1f;
 
         Vector3 toLeg = binding.legRootBone.position - rootSpace.position;
-
-        // Make side classification robust: ignore components along Up (important when character pitches/rolls)
         toLeg = Vector3.ProjectOnPlane(toLeg, up);
 
         return Vector3.Dot(toLeg, baseSide) >= 0f ? +1f : -1f;
@@ -330,7 +377,7 @@ public class HindPaddleTrajectoryRB : MonoBehaviour
         v0.Normalize();
         v1.Normalize();
 
-        float signed = Vector3.SignedAngle(v0, v1, up); // + = CCW around up
+        float signed = Vector3.SignedAngle(v0, v1, up);
         float mag = Mathf.Abs(signed);
 
         if (mag < 0.5f)
