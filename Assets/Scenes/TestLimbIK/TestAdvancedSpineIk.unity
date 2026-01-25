@@ -487,6 +487,10 @@ PrefabInstance:
       insertIndex: -1
       addedObject: {fileID: 1140128129}
     m_AddedComponents:
+    - targetCorrespondingSourceObject: {fileID: 8921369205768896625, guid: 8bfd809688f9e9e4990408c0c1f10aba,
+        type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 1766370178}
     - targetCorrespondingSourceObject: {fileID: 4070475903489324470, guid: 8bfd809688f9e9e4990408c0c1f10aba,
         type: 3}
       insertIndex: -1
@@ -850,6 +854,12 @@ Transform:
     type: 3}
   m_PrefabInstance: {fileID: 411864540}
   m_PrefabAsset: {fileID: 0}
+--- !u!4 &1229973272 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 234836195818921267, guid: 8bfd809688f9e9e4990408c0c1f10aba,
+    type: 3}
+  m_PrefabInstance: {fileID: 411864540}
+  m_PrefabAsset: {fileID: 0}
 --- !u!1 &1290633439
 GameObject:
   m_ObjectHideFlags: 0
@@ -932,7 +942,7 @@ MonoBehaviour:
     hingeMinDeg: -5
     hingeMaxDeg: 130
   end:
-    bone: {fileID: 1125699275}
+    bone: {fileID: 1229973272}
     forwardLocal: {x: 0, y: 1, z: 0}
     upLocal: {x: -1, y: 0, z: 0}
     weight: 1
@@ -944,8 +954,8 @@ MonoBehaviour:
     hingeAxisLocal: {x: 1, y: 0, z: 0}
     hingeMinDeg: -5
     hingeMaxDeg: 130
-  target: {fileID: 1290633440}
-  pole: {fileID: 1971121630}
+  target: {fileID: 1374920471}
+  pole: {fileID: 613610538}
   clampToMaxReach: 1
   allowStretch: 0
   maxStretch: 1.05
@@ -1065,6 +1075,56 @@ MonoBehaviour:
   alignEndRotation: 0
   endRotationWeight: 1
   useTargetForwardUp: 1
+  restoreOnDisable: 1
+--- !u!1 &1766370177 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 8921369205768896625, guid: 8bfd809688f9e9e4990408c0c1f10aba,
+    type: 3}
+  m_PrefabInstance: {fileID: 411864540}
+  m_PrefabAsset: {fileID: 0}
+--- !u!114 &1766370178
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1766370177}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3dce010a00587b24689422a0ab2b3e9e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  bones:
+  - bone: {fileID: 0}
+    forwardLocal: {x: 0, y: 1, z: 0}
+    upLocal: {x: 0, y: 0, z: -1}
+    weight: 0.7
+    useLimits: 0
+    yawLimit: 0
+    pitchLimit: 0
+    rollLimit: 0
+  - bone: {fileID: 0}
+    forwardLocal: {x: 0, y: 1, z: 0}
+    upLocal: {x: 0, y: 0, z: -1}
+    weight: 0.8
+    useLimits: 0
+    yawLimit: 0
+    pitchLimit: 0
+    rollLimit: 0
+  - bone: {fileID: 0}
+    forwardLocal: {x: 0, y: 1, z: 0}
+    upLocal: {x: 0, y: 0, z: -1}
+    weight: 0.9
+    useLimits: 0
+    yawLimit: 0
+    pitchLimit: 0
+    rollLimit: 0
+  aimTarget: {fileID: 0}
+  characterRoot: {fileID: 0}
+  strength: 1
+  followSpeed: 24
+  planarAimOnly: 1
+  useCharacterUpAsWorldUp: 1
   restoreOnDisable: 1
 --- !u!1 &1971121629
 GameObject:
