@@ -10,6 +10,7 @@ using UnityEngine;
 ///
 /// The otter can be off-center; the camera look-ahead determines how much (clamped).
 /// </summary>
+[DefaultExecutionOrder(650)]
 public class DualRingUIControllerRB : MonoBehaviour
 {
     [Header("References")]
