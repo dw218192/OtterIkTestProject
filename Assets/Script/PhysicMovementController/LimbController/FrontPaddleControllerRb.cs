@@ -38,6 +38,13 @@ public class FrontPaddleControllerRb : MonoBehaviour
     [Header("Optional Movement Controller RB (for intent/carrot direction)")]
     [SerializeField] private MovementControllerRB movement;
 
+    [Header("Space / Basis (Chest + Heading)")]
+    [Tooltip("Position space for restLocal / targets (use Chest/Ribcage). If null, falls back to this transform.")]
+    [SerializeField] private Transform posBasis;
+
+    [Tooltip("Direction space for forward/right/up (use otter root / locomotion root). If null, falls back to posBasis.")]
+    [SerializeField] private Transform dirBasis;
+
     [Header("Rest (local space of this controller transform)")]
     [SerializeField] private Vector3 leftRestLocal;
     [SerializeField] private Vector3 rightRestLocal;
@@ -178,12 +185,17 @@ public class FrontPaddleControllerRb : MonoBehaviour
     private float _speed;
     private Rigidbody _rb;
 
+    private Transform PosB => (posBasis != null) ? posBasis : transform;
+    private Transform DirB => (dirBasis != null) ? dirBasis : PosB;
+
     private void OnEnable()
     {
+        var B = PosB;
+
         if (captureRestOnEnable)
         {
-            if (leftTarget != null) leftRestLocal = transform.InverseTransformPoint(leftTarget.position);
-            if (rightTarget != null) rightRestLocal = transform.InverseTransformPoint(rightTarget.position);
+            if (leftTarget != null) leftRestLocal = B.InverseTransformPoint(leftTarget.position);
+            if (rightTarget != null) rightRestLocal = B.InverseTransformPoint(rightTarget.position);
         }
 
         _L = default;
@@ -237,11 +249,16 @@ public class FrontPaddleControllerRb : MonoBehaviour
 
             if (intent.sqrMagnitude > 1e-6f)
             {
-                Vector3 fwd = transform.forward; fwd.y = 0f;
-                if (fwd.sqrMagnitude > 1e-6f) fwd.Normalize();
-                intent.Normalize();
+                Vector3 upW = forceWaterPlane ? waterNormalWorld : Vector3.up;
+                upW.Normalize();
 
-                angleError = Vector3.SignedAngle(fwd, intent, Vector3.up); // deg
+                Vector3 fwdW = DirB.forward;
+                fwdW = Vector3.ProjectOnPlane(fwdW, upW);
+                fwdW.y = 0f;
+                if (fwdW.sqrMagnitude > 1e-6f) fwdW.Normalize();
+
+                intent.Normalize();
+                angleError = Vector3.SignedAngle(fwdW, intent, Vector3.up); // deg
             }
         }
 
@@ -479,7 +496,7 @@ public class FrontPaddleControllerRb : MonoBehaviour
         if (!timeDone) return;
 
         Vector3 restLocal = (side == Side.Left) ? leftRestLocal : rightRestLocal;
-        Vector3 curLocal = transform.InverseTransformPoint(targetTf.position);
+        Vector3 curLocal = PosB.InverseTransformPoint(targetTf.position);
         float d = Vector3.Distance(curLocal, restLocal);
 
         float eps = Mathf.Max(0.001f, restEpsilonLocal);
@@ -493,7 +510,7 @@ public class FrontPaddleControllerRb : MonoBehaviour
         {
             // If we never quite reached rest due to smoothing, snap once recovery is definitely over.
             if (graceDone && d > eps)
-                targetTf.position = transform.TransformPoint(restLocal);
+                targetTf.position = PosB.TransformPoint(restLocal);
 
             s.state = PaddleState.Idle;
             s.stateTime = 0f;
@@ -540,7 +557,7 @@ public class FrontPaddleControllerRb : MonoBehaviour
     private Vector3 GetRestWorld(Side side)
     {
         Vector3 restLocal = (side == Side.Left) ? leftRestLocal : rightRestLocal;
-        return transform.TransformPoint(restLocal);
+        return PosB.TransformPoint(restLocal);
     }
 
     /// <summary>
@@ -602,12 +619,12 @@ public class FrontPaddleControllerRb : MonoBehaviour
     private void GetEllipseBasisWorld(Side side, out Vector3 outW, out Vector3 backW, out Vector3 upW)
     {
         // Water normal
-        upW = forceWaterPlane ? waterNormalWorld : transform.up;
+        upW = forceWaterPlane ? waterNormalWorld : Vector3.up;
         if (upW.sqrMagnitude < 1e-6f) upW = Vector3.up;
         upW.Normalize();
 
         // Forward projected onto water plane
-        Vector3 fwdW = transform.forward;
+        Vector3 fwdW = DirB.forward;
         fwdW = Vector3.ProjectOnPlane(fwdW, upW);
         if (fwdW.sqrMagnitude < 1e-6f) fwdW = Vector3.ProjectOnPlane(Vector3.forward, upW);
         fwdW.Normalize();
