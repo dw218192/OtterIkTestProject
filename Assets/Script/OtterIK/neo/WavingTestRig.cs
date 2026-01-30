@@ -20,10 +20,11 @@ public class WavingTestRig : MonoBehaviour
     public KeyCode triggerKey = KeyCode.Space;
 
     [Header("Manual Pulse Params")]
-    public float manualAmplitudeDeg = 10f;
-    public float manualFrequencyHz = 3.0f;
-    public float manualDecayPerSec = 2.5f;
-    public float manualTravelCycles = 1.2f;
+    public float manualCycleDurationK = 0.33f;
+    public float manualIntervalI = 0.17f;
+    public float manualDemand01 = 1f;
+    public float manualOscillationsPerCycle = 1f;
+    public float manualResidualTime = -1f;  // -1 => use system default
 
     private void Update()
     {
@@ -31,11 +32,16 @@ public class WavingTestRig : MonoBehaviour
 
         if (Input.GetKeyDown(triggerKey))
         {
-            pulseSystem.TriggerManual(
-                amplitudeDeg: manualAmplitudeDeg,
-                frequencyHz: manualFrequencyHz,
-                decayPerSec: manualDecayPerSec,
-                travelCycles: manualTravelCycles
+            float? resOverride = null;
+            if (manualResidualTime >= 0f) resOverride = manualResidualTime;
+
+            pulseSystem.TriggerManualPulse(
+                cycleDuration: manualCycleDurationK,
+                intervalDuration: manualIntervalI,
+                demand01: manualDemand01,
+                oscPerCycleOverride: manualOscillationsPerCycle,
+                travelCyclesOverride: null,
+                residualTimeOverride: resOverride
             );
         }
     }
@@ -50,25 +56,28 @@ public class WavingTestRig : MonoBehaviour
         {
             delayChain.GetDelayedPose(i, now, out var p, out var r, out var f, out var u, out var rt);
 
+            // Prefer bone position for gizmo anchors so visuals stay glued to the rig
+            var n = delayChain.nodes[i];
+            Vector3 anchorPos = (n != null && n.bone != null) ? n.bone.position : p;
+
             Gizmos.color = Color.white;
-            Gizmos.DrawWireSphere(p, sphereRadius);
+            Gizmos.DrawWireSphere(anchorPos, sphereRadius);
 
             Gizmos.color = Color.cyan;
-            Gizmos.DrawLine(p, p + f * axisLen);
+            Gizmos.DrawLine(anchorPos, anchorPos + f * axisLen);
 
             Gizmos.color = Color.magenta;
-            Gizmos.DrawLine(p, p + u * axisLen * 0.85f);
+            Gizmos.DrawLine(anchorPos, anchorPos + u * axisLen * 0.85f);
 
             Gizmos.color = Color.yellow;
-            Gizmos.DrawLine(p, p + rt * axisLen * 0.7f);
+            Gizmos.DrawLine(anchorPos, anchorPos + rt * axisLen * 0.7f);
 
 #if UNITY_EDITOR
             if (drawLabels)
             {
-                var n = delayChain.nodes[i];
                 float delay = delayChain.GetNodeDelaySeconds(i);
                 string name = (n != null && n.bone != null) ? n.bone.name : $"node{i}";
-                UnityEditor.Handles.Label(p + Vector3.up * 0.03f,
+                UnityEditor.Handles.Label(anchorPos + Vector3.up * 0.03f,
                     $"{name}\nidx={delayChain.GetDistanceFactor01(i):0.00}  delay={delay:0.000}s");
             }
 #endif

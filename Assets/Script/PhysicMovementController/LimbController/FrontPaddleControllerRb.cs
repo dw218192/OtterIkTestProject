@@ -38,12 +38,15 @@ public class FrontPaddleControllerRb : MonoBehaviour
     [Header("Optional Movement Controller RB (for intent/carrot direction)")]
     [SerializeField] private MovementControllerRB movement;
 
-    [Header("Space / Basis (Chest + Heading)")]
-    [Tooltip("Position space for restLocal / targets (use Chest/Ribcage). If null, falls back to this transform.")]
-    [SerializeField] private Transform posBasis;
+    [Header("Root Axes Override (LOCAL space of this object)")]
+    [Tooltip("Define what 'forward' means for this controller, in THIS object's LOCAL space.")]
+    [SerializeField] private Vector3 rootForwardLocal = Vector3.forward;
 
-    [Tooltip("Direction space for forward/right/up (use otter root / locomotion root). If null, falls back to posBasis.")]
-    [SerializeField] private Transform dirBasis;
+    [Tooltip("Define what 'up' means for this controller, in THIS object's LOCAL space.")]
+    [SerializeField] private Vector3 rootUpLocal = Vector3.up;
+
+    [Tooltip("If true, ALL trajectory/rest offsets are interpreted in THIS object's local space (root).")]
+    [SerializeField] private bool offsetsInRootLocalSpace = true;
 
     [Header("Rest (local space of this controller transform)")]
     [SerializeField] private Vector3 leftRestLocal;
@@ -185,8 +188,8 @@ public class FrontPaddleControllerRb : MonoBehaviour
     private float _speed;
     private Rigidbody _rb;
 
-    private Transform PosB => (posBasis != null) ? posBasis : transform;
-    private Transform DirB => (dirBasis != null) ? dirBasis : PosB;
+    // For this request: offsets live in the root(local) space of THIS object.
+    private Transform PosB => transform;
 
     private void OnEnable()
     {
@@ -249,13 +252,13 @@ public class FrontPaddleControllerRb : MonoBehaviour
 
             if (intent.sqrMagnitude > 1e-6f)
             {
-                Vector3 upW = forceWaterPlane ? waterNormalWorld : Vector3.up;
-                upW.Normalize();
-
-                Vector3 fwdW = DirB.forward;
-                fwdW = Vector3.ProjectOnPlane(fwdW, upW);
-                fwdW.y = 0f;
-                if (fwdW.sqrMagnitude > 1e-6f) fwdW.Normalize();
+                GetRootBasisWorld(out Vector3 fwdW, out Vector3 upW);
+                if (forceWaterPlane)
+                {
+                    upW = waterNormalWorld.sqrMagnitude > 1e-6f ? waterNormalWorld.normalized : Vector3.up;
+                    fwdW = Vector3.ProjectOnPlane(fwdW, upW);
+                    if (fwdW.sqrMagnitude > 1e-6f) fwdW.Normalize();
+                }
 
                 intent.Normalize();
                 angleError = Vector3.SignedAngle(fwdW, intent, Vector3.up); // deg
@@ -618,17 +621,25 @@ public class FrontPaddleControllerRb : MonoBehaviour
 
     private void GetEllipseBasisWorld(Side side, out Vector3 outW, out Vector3 backW, out Vector3 upW)
     {
-        // Water normal
-        upW = forceWaterPlane ? waterNormalWorld : Vector3.up;
-        if (upW.sqrMagnitude < 1e-6f) upW = Vector3.up;
-        upW.Normalize();
+        // Root-defined axes (world)
+        GetRootBasisWorld(out Vector3 fwdW, out Vector3 upRootW);
 
-        // Forward projected onto water plane
-        Vector3 fwdW = DirB.forward;
+        // Choose plane normal
+        upW = forceWaterPlane
+            ? (waterNormalWorld.sqrMagnitude > 1e-6f ? waterNormalWorld.normalized : Vector3.up)
+            : upRootW;
+
+        // Make forward lie in the chosen plane so the "midline ⟂ forward" stays stable
         fwdW = Vector3.ProjectOnPlane(fwdW, upW);
-        if (fwdW.sqrMagnitude < 1e-6f) fwdW = Vector3.ProjectOnPlane(Vector3.forward, upW);
+        if (fwdW.sqrMagnitude < 1e-6f)
+        {
+            // fallback: any axis not parallel to upW
+            fwdW = Vector3.ProjectOnPlane(transform.forward, upW);
+            if (fwdW.sqrMagnitude < 1e-6f) fwdW = Vector3.ProjectOnPlane(Vector3.forward, upW);
+        }
         fwdW.Normalize();
 
+        // This guarantees: rightW ⟂ fwdW (and in the plane), so your two-track midline is always perpendicular to forward.
         Vector3 rightW = Vector3.Cross(upW, fwdW);
         if (rightW.sqrMagnitude < 1e-6f) rightW = Vector3.right;
         rightW.Normalize();
@@ -642,6 +653,32 @@ public class FrontPaddleControllerRb : MonoBehaviour
 
         // NOTE: backW points toward tail, fwdW points toward head
         backW = -fwdW;
+    }
+
+    /// <summary>
+    /// Builds an orthonormal basis (forward/up) from user-provided LOCAL vectors on this root.
+    /// This is the core of:
+    /// - user-defined forward/up
+    /// - trajectory midline always ⟂ forward (because right = cross(up, forward))
+    /// </summary>
+    private void GetRootBasisWorld(out Vector3 fwdW, out Vector3 upW)
+    {
+        // Interpret user input as LOCAL directions of this object
+        Vector3 fL = (rootForwardLocal.sqrMagnitude > 1e-6f) ? rootForwardLocal : Vector3.forward;
+        Vector3 uL = (rootUpLocal.sqrMagnitude > 1e-6f) ? rootUpLocal : Vector3.up;
+
+        fwdW = transform.TransformDirection(fL).normalized;
+        upW  = transform.TransformDirection(uL).normalized;
+
+        // Orthonormalize up against forward
+        upW = Vector3.ProjectOnPlane(upW, fwdW);
+        if (upW.sqrMagnitude < 1e-6f)
+        {
+            // pick any up that's not parallel to forward
+            upW = Vector3.ProjectOnPlane(Vector3.up, fwdW);
+            if (upW.sqrMagnitude < 1e-6f) upW = Vector3.ProjectOnPlane(Vector3.right, fwdW);
+        }
+        upW.Normalize();
     }
 
     private static Vector3 Bezier2(Vector3 p0, Vector3 c, Vector3 p1, float t)
