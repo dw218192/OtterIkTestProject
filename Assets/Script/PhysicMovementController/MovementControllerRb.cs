@@ -38,6 +38,13 @@ public class MovementControllerRB : MonoBehaviour
     [SerializeField] private DualRingUIControllerRB ui;
     [SerializeField] private Rigidbody rb;
 
+    [Header("Propulsion alignment gate (optional)")]
+    [Tooltip("If enabled, only apply kick impulse when root forward is within Max Angle of the target move direction (worldDir).")]
+    [SerializeField] private bool enableAlignmentGate = true;
+    [Tooltip("Allowed angle (degrees) between root forward and target move direction to allow propulsion.")]
+    [Range(0f, 180f)]
+    [SerializeField] private float maxAlignmentAngleDeg = 80f;
+
     [Header("Water plane")]
     [SerializeField] private bool useFixedPlaneY = true;
     [SerializeField] private float fixedPlaneY = 0f;
@@ -364,6 +371,11 @@ public class MovementControllerRB : MonoBehaviour
             return;
         }
 
+        // Optional: gate propulsion based on root forward vs target movement direction (worldDir)
+        bool allowPropulsion = true;
+        if (enableAlignmentGate)
+            allowPropulsion = IsForwardAlignedWithWorldDir(maxAlignmentAngleDeg);
+
         // Demand from speed deficit along steerDir
         float vAlong = Vector3.Dot(GetVelocity(), steerDir);
         float dv = targetSpeed - vAlong;
@@ -410,10 +422,18 @@ public class MovementControllerRB : MonoBehaviour
                     phaseRemain += Mathf.Max(0.01f, kickTime);
 
                     // Apply impulse at the START of Kick phase
-                    rb.AddForce(steerDir * impulse, ForceMode.Impulse);
+                    if (allowPropulsion)
+                    {
+                        rb.AddForce(steerDir * impulse, ForceMode.Impulse);
+                        lastKickImpulse = impulse;
+                    }
+                    else
+                    {
+                        // Still advance rhythm, but no propulsion this kick.
+                        lastKickImpulse = 0f;
+                    }
 
                     lastKickRate = cadenceHz;
-                    lastKickImpulse = impulse;
 
                     // Predict next kick moment (after kick + interval + next prepare)
                     nextKickTime = Time.time + kickTime + I + prepareTime;
@@ -609,4 +629,17 @@ public class MovementControllerRB : MonoBehaviour
     public float GetI() => I;
     public float GetPrepareTime() => prepareTime;
     public float GetKickTime() => kickTime;
+
+    // ---------------- Alignment gate helper ----------------
+
+    private bool IsForwardAlignedWithWorldDir(float maxAngleDeg)
+    {
+        Vector3 fwd = transform.forward; fwd.y = 0f;
+        Vector3 dir = worldDir;         dir.y = 0f;
+        if (fwd.sqrMagnitude < 1e-6f || dir.sqrMagnitude < 1e-6f) return true;
+        fwd.Normalize();
+        dir.Normalize();
+        float ang = Vector3.Angle(fwd, dir);
+        return ang <= Mathf.Clamp(maxAngleDeg, 0f, 180f);
+    }
 }

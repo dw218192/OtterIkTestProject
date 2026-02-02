@@ -1,4 +1,3 @@
-using System;
 using UnityEngine;
 
 /// <summary>
@@ -6,57 +5,20 @@ using UnityEngine;
 /// A bind-pose-safe soft spine driver designed for "head looks first, body follows".
 ///
 /// Features:
-/// - Per-bone configurable ForwardAxis and UpAxis (in bone local space).
+/// - Per-joint configurable ForwardAxis and UpAxis (in bone local space).
 /// - Stable aiming toward head intent guide (yaw-only or full 3D).
-/// - Per-bone weight, max angle, sharpness multiplier.
+/// - Per-joint weight, max angle, sharpness multiplier.
 /// - Turn-roll support:
 ///     A) Dynamic roll from yaw rate (deg/s)
 ///     B) Intent roll from desired yaw (works even at 0 speed) with a minimum roll intensity.
 /// - Roll is applied around each bone's forward axis (defined by your ForwardAxis).
 ///
-/// Recommended chain order:
-/// spine1 -> spine2 -> spine3 -> subneck -> neck (exclude head; head can be controlled by your head IK).
+/// Recommended chain order (in SpineChainDefinition):
+/// hip-side spine -> ... -> chest/neck (exclude head).
 /// </summary>
 [DisallowMultipleComponent]
 public class SoftSpineDriving : MonoBehaviour
 {
-    [Serializable]
-    public class BoneDrive
-    {
-        [Header("Bone")]
-        public Transform bone;
-
-        [Header("Local Axes (Bone Space)")]
-        [Tooltip("Bone local-space forward axis, e.g. (0,0,1) for +Z, (1,0,0) for +X, or negatives.")]
-        public Vector3 forwardAxis = Vector3.forward;
-
-        [Tooltip("Bone local-space up axis, e.g. (0,1,0) for +Y. Must not be colinear with forwardAxis.")]
-        public Vector3 upAxis = Vector3.up;
-
-        [Header("Aim (Bend)")]
-        [Range(0f, 1f)]
-        public float weight = 0.2f;
-
-        [Tooltip("Max aim/bend angle (deg) for this bone.")]
-        [Range(0f, 90f)]
-        public float maxAngleDeg = 25f;
-
-        [Tooltip("Per-bone follow multiplier (1 = same as global followSharpness).")]
-        [Range(0.1f, 5f)]
-        public float sharpnessMul = 1f;
-
-        [Header("Turn Roll")]
-        [Tooltip("How much of the total roll this bone gets (0..1).")]
-        [Range(0f, 1f)]
-        public float rollWeight = 0.2f;
-
-        [Tooltip("Max roll (deg) for this bone.")]
-        [Range(0f, 45f)]
-        public float maxRollDeg = 12f;
-
-        [NonSerialized] public Quaternion bindLocalRot;
-    }
-
     [Header("References")]
     [Tooltip("Reference origin + reference forward for spine intent. Typically otter_root (body center).")]
     public Transform spineAnchor;
@@ -74,9 +36,8 @@ public class SoftSpineDriving : MonoBehaviour
     [Tooltip("Yaw-only is the most stable for top-down swimming (recommended).")]
     public bool yawOnly = true;
 
-    [Header("Global Follow (Aim/Bend)")]
-    [Range(0.01f, 30f)]
-    public float followSharpness = 10f;
+    [Tooltip("How quickly the spine direction follows the guide (higher = snappier).")]
+    public float followSharpness = 14f;
 
     [Tooltip("Small jitter dead zone (deg).")]
     [Range(0f, 10f)]
@@ -86,8 +47,9 @@ public class SoftSpineDriving : MonoBehaviour
     [Range(0f, 180f)]
     public float maxTotalAngleDeg = 80f;
 
-    [Header("Bones (spine1..neck, exclude head)")]
-    public BoneDrive[] chain;
+    [Header("Spine Chain (hip..chest/neck, exclude head)")]
+    [Tooltip("Authoritative spine joints, ordered from HIP (tail-side) to CHEST/NECK (head-side).")]
+    public SpineChainDefinition spineDefinition;
 
     [Header("Turn Roll")]
     public bool enableTurnRoll = true;
@@ -108,10 +70,10 @@ public class SoftSpineDriving : MonoBehaviour
     [Tooltip("How much roll comes from intent yaw delta (deg roll per 1 deg yaw intent).")]
     public float intentYawToRoll = 0.12f;
 
-    [Tooltip("Intent yaw dead zone (deg). Below this, no intent roll.")]
-    public float intentYawDeadZoneDeg = 2.0f;
+    [Tooltip("Intent yaw (deg) below this is treated as no intent.")]
+    public float intentYawDeadZoneDeg = 2f;
 
-    [Tooltip("Intent yaw (deg) at which the minimum roll is fully allowed (smooth ramp).")]
+    [Tooltip("Intent yaw (deg) that maps to full minimum roll (minIntentRollDeg). Must be > intentYawDeadZoneDeg.")]
     public float intentYawForFullMinRollDeg = 25f;
 
     [Tooltip("If your roll direction feels reversed, toggle this.")]
@@ -138,17 +100,8 @@ public class SoftSpineDriving : MonoBehaviour
 
     private void OnValidate()
     {
-        if (chain == null) return;
-        for (int i = 0; i < chain.Length; i++)
-        {
-            var b = chain[i];
-            if (b == null) continue;
-            if (b.forwardAxis.sqrMagnitude < 1e-6f) b.forwardAxis = Vector3.forward;
-            if (b.upAxis.sqrMagnitude < 1e-6f) b.upAxis = Vector3.up;
-
-            // Keep intentYawForFullMinRollDeg sane
-            intentYawForFullMinRollDeg = Mathf.Max(intentYawDeadZoneDeg + 0.001f, intentYawForFullMinRollDeg);
-        }
+        // Keep intentYawForFullMinRollDeg sane
+        intentYawForFullMinRollDeg = Mathf.Max(intentYawDeadZoneDeg + 0.001f, intentYawForFullMinRollDeg);
     }
 
     private void Initialize()
@@ -157,14 +110,12 @@ public class SoftSpineDriving : MonoBehaviour
 
         if (spineAnchor == null) spineAnchor = transform;
         if (upReference == null) upReference = transform;
-        if (chain == null) chain = Array.Empty<BoneDrive>();
 
-        for (int i = 0; i < chain.Length; i++)
-        {
-            var b = chain[i];
-            if (b == null || b.bone == null) continue;
-            b.bindLocalRot = b.bone.localRotation;
-        }
+        if (spineDefinition == null || spineDefinition.Count == 0)
+            return;
+
+        // Capture bind pose from the authoritative definition.
+        spineDefinition.CaptureBindLocalRotations(force: false);
 
         Vector3 up = useWorldUp ? Vector3.up : upReference.up;
 
@@ -185,21 +136,21 @@ public class SoftSpineDriving : MonoBehaviour
     private void LateUpdate()
     {
         if (!_initialized) Initialize();
-        if (headIKGuide == null || spineAnchor == null || chain == null || chain.Length == 0) return;
+
+        if (headIKGuide == null || spineAnchor == null || spineDefinition == null || spineDefinition.Count == 0) return;
 
         Vector3 upWorld = useWorldUp ? Vector3.up : upReference.up;
+        if (upWorld.sqrMagnitude < 1e-6f) upWorld = Vector3.up;
+        upWorld.Normalize();
 
-        // ----- 1) Compute desired direction from anchor -> head guide -----
-        Vector3 intentWorld = headIKGuide.position - spineAnchor.position;
-        if (intentWorld.sqrMagnitude < 1e-6f) return;
-
-        Vector3 desiredDirWorld = intentWorld.normalized;
-
-        // We'll compute "desiredYawDeg" for intent-roll (yawOnly uses this naturally).
-        float desiredYawDeg = 0f;
+        // ----- 1) Compute desired direction -----
+        Vector3 desiredDirWorld = (headIKGuide.position - spineAnchor.position);
+        if (desiredDirWorld.sqrMagnitude < 1e-6f) return;
+        desiredDirWorld.Normalize();
 
         if (yawOnly)
         {
+            // Yaw-only in upWorld plane
             Vector3 desiredPlane = Vector3.ProjectOnPlane(desiredDirWorld, upWorld);
             if (desiredPlane.sqrMagnitude < 1e-6f) return;
             desiredPlane.Normalize();
@@ -208,7 +159,7 @@ public class SoftSpineDriving : MonoBehaviour
             if (anchorFwd.sqrMagnitude < 1e-6f) anchorFwd = desiredPlane;
             else anchorFwd.Normalize();
 
-            desiredYawDeg = Vector3.SignedAngle(anchorFwd, desiredPlane, upWorld);
+            float desiredYawDeg = Vector3.SignedAngle(anchorFwd, desiredPlane, upWorld);
             if (Mathf.Abs(desiredYawDeg) < deadZoneDeg) desiredYawDeg = 0f;
             desiredYawDeg = Mathf.Clamp(desiredYawDeg, -maxTotalAngleDeg, maxTotalAngleDeg);
 
@@ -216,7 +167,7 @@ public class SoftSpineDriving : MonoBehaviour
         }
         else
         {
-            // Full 3D clamp (still stable due to per-bone upAxis roll handling)
+            // Full 3D clamp
             float ang = Vector3.Angle(spineAnchor.forward, desiredDirWorld);
             if (ang < deadZoneDeg)
             {
@@ -230,18 +181,6 @@ public class SoftSpineDriving : MonoBehaviour
                     axis.Normalize();
                     desiredDirWorld = (Quaternion.AngleAxis(maxTotalAngleDeg, axis) * spineAnchor.forward).normalized;
                 }
-            }
-
-            // For intent-roll when not yawOnly: approximate desiredYawDeg from plane projection.
-            Vector3 anchorFwdPlane = Vector3.ProjectOnPlane(spineAnchor.forward, upWorld);
-            Vector3 desiredPlane = Vector3.ProjectOnPlane(desiredDirWorld, upWorld);
-            if (anchorFwdPlane.sqrMagnitude > 1e-6f && desiredPlane.sqrMagnitude > 1e-6f)
-            {
-                anchorFwdPlane.Normalize();
-                desiredPlane.Normalize();
-                desiredYawDeg = Vector3.SignedAngle(anchorFwdPlane, desiredPlane, upWorld);
-                if (Mathf.Abs(desiredYawDeg) < deadZoneDeg) desiredYawDeg = 0f;
-                desiredYawDeg = Mathf.Clamp(desiredYawDeg, -maxTotalAngleDeg, maxTotalAngleDeg);
             }
         }
 
@@ -259,44 +198,62 @@ public class SoftSpineDriving : MonoBehaviour
 
             // A) dynamic roll from yawRate (deg/s), using anchor forward on plane
             Vector3 anchorFwdPlane = Vector3.ProjectOnPlane(spineAnchor.forward, upWorld);
-            if (anchorFwdPlane.sqrMagnitude > 1e-6f) anchorFwdPlane.Normalize();
+            if (anchorFwdPlane.sqrMagnitude < 1e-6f) anchorFwdPlane = _prevAnchorFwdPlane;
+            else anchorFwdPlane.Normalize();
 
-            float yawDeltaDeg = 0f;
+            float yawRateDeg = 0f;
             if (_prevAnchorFwdPlane.sqrMagnitude > 1e-6f && anchorFwdPlane.sqrMagnitude > 1e-6f)
-                yawDeltaDeg = Vector3.SignedAngle(_prevAnchorFwdPlane, anchorFwdPlane, upWorld);
+                yawRateDeg = Vector3.SignedAngle(_prevAnchorFwdPlane, anchorFwdPlane, upWorld) / dt;
 
             _prevAnchorFwdPlane = anchorFwdPlane;
 
-            float yawRateDegPerSec = yawDeltaDeg / dt;
-            float roll01_rate = Mathf.Clamp(yawRateDegPerSec / Mathf.Max(1e-3f, maxYawRateForFullRoll), -1f, 1f);
-            float rollFromRateDeg = roll01_rate * maxTotalRollDeg;
-
-            // B) intent roll from desired yaw (works even at 0 speed)
-            float yawIntentDeg = desiredYawDeg;
-            float absIntent = Mathf.Abs(yawIntentDeg);
-
-            float rollFromIntentDeg = 0f;
-            if (absIntent > intentYawDeadZoneDeg)
+            float rollFromRateDeg = 0f;
+            float rateAbs = Mathf.Abs(yawRateDeg);
+            if (rateAbs > 1e-3f)
             {
-                float sign = Mathf.Sign(yawIntentDeg);
-
-                float mapped = absIntent * intentYawToRoll;
-
-                float denom = Mathf.Max(1e-3f, intentYawForFullMinRollDeg - intentYawDeadZoneDeg);
-                float tMin = Mathf.Clamp01((absIntent - intentYawDeadZoneDeg) / denom);
-                float minRoll = Mathf.Lerp(0f, minIntentRollDeg, tMin);
-
-                float absRoll = Mathf.Max(mapped, minRoll);
-                rollFromIntentDeg = sign * absRoll;
+                float t = Mathf.Clamp01(rateAbs / Mathf.Max(1e-3f, maxYawRateForFullRoll));
+                rollFromRateDeg = Mathf.Sign(yawRateDeg) * (t * maxTotalRollDeg);
             }
 
-            // Combine: pick the stronger one (more stable than pure add), but still allow intent when rate is tiny
-            desiredRollDeg = (Mathf.Abs(rollFromRateDeg) > Mathf.Abs(rollFromIntentDeg)) ? rollFromRateDeg : rollFromIntentDeg;
+            // B) intent roll from desired yaw (works even if yawRate small)
+            float rollFromIntentDeg = 0f;
+            if (yawOnly)
+            {
+                Vector3 desiredPlane = Vector3.ProjectOnPlane(_smoothedDirWorld, upWorld);
+                Vector3 anchorPlane = Vector3.ProjectOnPlane(spineAnchor.forward, upWorld);
 
+                if (desiredPlane.sqrMagnitude > 1e-6f && anchorPlane.sqrMagnitude > 1e-6f)
+                {
+                    desiredPlane.Normalize();
+                    anchorPlane.Normalize();
+
+                    float yawIntentDeg = Vector3.SignedAngle(anchorPlane, desiredPlane, upWorld);
+                    float absIntent = Mathf.Abs(yawIntentDeg);
+
+                    if (absIntent < intentYawDeadZoneDeg)
+                    {
+                        rollFromIntentDeg = 0f;
+                    }
+                    else
+                    {
+                        float sign = Mathf.Sign(yawIntentDeg);
+                        float mapped = absIntent * intentYawToRoll;
+
+                        float denom = Mathf.Max(1e-3f, intentYawForFullMinRollDeg - intentYawDeadZoneDeg);
+                        float tMin = Mathf.Clamp01((absIntent - intentYawDeadZoneDeg) / denom);
+                        float minRoll = Mathf.Lerp(0f, minIntentRollDeg, tMin);
+
+                        float absRoll = Mathf.Max(mapped, minRoll);
+                        rollFromIntentDeg = sign * absRoll;
+                    }
+                }
+            }
+
+            // Combine: pick the stronger one (more stable than pure add)
+            desiredRollDeg = (Mathf.Abs(rollFromRateDeg) > Mathf.Abs(rollFromIntentDeg)) ? rollFromRateDeg : rollFromIntentDeg;
             if (invertRollSign) desiredRollDeg = -desiredRollDeg;
 
-            desiredRollDeg = Mathf.Clamp(desiredRollDeg, -maxTotalRollDeg, maxTotalRollDeg);
-
+            // Smooth roll
             float rollSmoothTime = Mathf.Max(0.001f, 1f / Mathf.Max(0.01f, rollSharpness));
             _smoothedRollDeg = Mathf.SmoothDampAngle(_smoothedRollDeg, desiredRollDeg, ref _rollVel, rollSmoothTime);
         }
@@ -308,9 +265,9 @@ public class SoftSpineDriving : MonoBehaviour
         }
 
         // ----- 3) Apply to each bone (parent-space basis method, bind safe) -----
-        for (int i = 0; i < chain.Length; i++)
+        for (int i = 0; i < spineDefinition.Count; i++)
         {
-            var bd = chain[i];
+            var bd = spineDefinition.GetJoint(i);
             if (bd == null || bd.bone == null) continue;
 
             Transform bone = bd.bone;
@@ -327,11 +284,10 @@ public class SoftSpineDriving : MonoBehaviour
             fAxis.Normalize();
             uAxis.Normalize();
 
-            // Prevent colinear axes
             if (Vector3.Cross(fAxis, uAxis).sqrMagnitude < 1e-6f)
                 uAxis = (Mathf.Abs(Vector3.Dot(fAxis, Vector3.up)) < 0.95f) ? Vector3.up : Vector3.right;
 
-            Quaternion bindLocal = bd.bindLocalRot;
+            Quaternion bindLocal = spineDefinition.GetBindLocalRot(i, captureIfMissing: true);
 
             // Desired direction in parent space
             Vector3 desiredDirParent = parent.InverseTransformDirection(_smoothedDirWorld);
@@ -392,7 +348,7 @@ public class SoftSpineDriving : MonoBehaviour
 
             Quaternion deltaRoll = Quaternion.AngleAxis(boneRoll, rollAxisParent);
 
-            // Compose target local rotation: roll after aim (feel free to swap if you prefer)
+            // Compose target local rotation: roll after aim
             Quaternion targetLocal = (deltaRoll * deltaAim) * bindLocal;
 
             // Smooth + weight
@@ -411,7 +367,6 @@ public class SoftSpineDriving : MonoBehaviour
 
             if (enableTurnRoll)
             {
-                // Visualize roll magnitude
                 float r = Mathf.Abs(_smoothedRollDeg) / Mathf.Max(1e-3f, maxTotalRollDeg);
                 Debug.DrawRay(spineAnchor.position, upWorld * (0.3f + 0.4f * r), Color.magenta);
             }
