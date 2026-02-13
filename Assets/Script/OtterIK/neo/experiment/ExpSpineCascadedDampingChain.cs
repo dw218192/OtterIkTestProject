@@ -3,281 +3,135 @@ using UnityEngine;
 
 namespace OtterIK.Neo.Experiment
 {
-    /// <summary>
-    /// Experiment: cascaded (chain) damping for spine-like joints, with provider inputs.
-    /// This reproduces WavingTestRig's apply order:
-    /// - Build raw absolute local targets per joint
-    /// - Cascaded propagation + half-life damping
-    /// - Apply definition weight at FINAL apply (blend bind -> filtered), like WavingTestRig
-    /// Single-writer: this should be the only script writing spine bone transforms.
-    /// </summary>
-    [DefaultExecutionOrder(9000)]
-    [DisallowMultipleComponent]
+    [DefaultExecutionOrder(32000)]
     public class ExpSpineCascadedDampingChain : MonoBehaviour
     {
-        public enum PropagationDirection
-        {
-            HipToChest,
-            ChestToHip
-        }
+        public enum PropagationDirection { HipToChest, ChestToHip }
 
         [Header("Chain")]
         public SpineChainDefinition spine;
 
-        [Header("Providers (inputs)")]
-        [Tooltip("Providers output absolute local targets which are blended into a raw target pose each frame.")]
-        public List<ExpSpinePoseProviderBase> providers = new();
-
         [Header("Propagation")]
-        public PropagationDirection propagation = PropagationDirection.ChestToHip;
+        public PropagationDirection propagation = PropagationDirection.HipToChest;
+        [Range(0f, 1f)] public float propagationBlend = 0.75f;
 
-        [Tooltip("0 = each joint damps toward its own raw target; 1 = strongly follows upstream filtered pose.")]
-        [Range(0f, 1f)]
-        public float propagationBlend = 0.75f;
-
-        [Header("Damping (Half-life)")]
-        [Range(0.01f, 2.0f)]
-        public float rotationHalfLife = 0.12f;
-
-        [Range(0.01f, 2.0f)]
-        public float positionHalfLife = 0.25f;
-
-        [Tooltip("Per-joint multiplier curve for rotation half-life. x=normalizedFromHip01.")]
+        [Header("Damping")]
+        [Range(0.01f, 2.0f)] public float rotationHalfLife = 0.12f;
         public AnimationCurve rotHalfLifeMul = AnimationCurve.Linear(0, 1, 1, 1);
 
-        [Tooltip("Per-joint multiplier curve for position half-life. x=normalizedFromHip01.")]
-        public AnimationCurve posHalfLifeMul = AnimationCurve.Linear(0, 1, 1, 1);
-
-        [Header("Apply options")]
-        [Tooltip("If true, apply localPosition damping too. Otherwise keeps bind localPosition.")]
-        public bool applyLocalPosition = false;
-
-        [Tooltip("If true, multiplies the final applied intensity by SpineChainDefinition.Joint.weight (WavingTestRig-style).")]
-        public bool applyDefinitionWeight = true;
-
-        [Tooltip("If false, total provider weight is clamped to 1. (recommended)")]
-        public bool allowOverdriveWeight = false;
-
-        [Header("Debug")]
-        public bool drawDebug = false;
+        [Header("Providers")]
+        public List<ExpSpinePoseProviderBase> providers = new();
 
         private Quaternion[] _bindLocalRot;
-        private Vector3[] _bindLocalPos;
-
-        private Quaternion[] _filteredLocalRot;
-        private Vector3[] _filteredLocalPos;
-
+        private Quaternion[] _filteredDelta; 
         private bool _initialized;
-
-        private void Awake() => InitializeIfNeeded(force: true);
-        private void OnEnable() => InitializeIfNeeded(force: false);
-        private void OnValidate() => _initialized = false;
-
-        [ContextMenu("Reset Filtered State To Current")]
-        public void ResetFilteredToCurrent()
-        {
-            if (spine == null || spine.Count == 0) return;
-            EnsureArrays();
-
-            for (int i = 0; i < spine.Count; i++)
-            {
-                var j = spine.GetJoint(i);
-                if (j == null || j.bone == null) continue;
-                _filteredLocalRot[i] = j.bone.localRotation;
-                _filteredLocalPos[i] = j.bone.localPosition;
-            }
-        }
-
-        private void InitializeIfNeeded(bool force)
-        {
-            if (_initialized && !force) return;
-            if (spine == null || spine.Count == 0) return;
-
-            spine.CaptureBindLocalRotations(force: false);
-            EnsureArrays();
-
-            for (int i = 0; i < spine.Count; i++)
-            {
-                var j = spine.GetJoint(i);
-                if (j == null || j.bone == null) continue;
-
-                _bindLocalRot[i] = spine.GetBindLocalRot(i, captureIfMissing: true);
-                _bindLocalPos[i] = j.bone.localPosition;
-
-                _filteredLocalRot[i] = j.bone.localRotation;
-                _filteredLocalPos[i] = j.bone.localPosition;
-            }
-
-            _initialized = true;
-        }
-
-        private void EnsureArrays()
-        {
-            int n = spine != null ? spine.Count : 0;
-            if (n <= 0) return;
-
-            if (_bindLocalRot == null || _bindLocalRot.Length != n) _bindLocalRot = new Quaternion[n];
-            if (_bindLocalPos == null || _bindLocalPos.Length != n) _bindLocalPos = new Vector3[n];
-            if (_filteredLocalRot == null || _filteredLocalRot.Length != n) _filteredLocalRot = new Quaternion[n];
-            if (_filteredLocalPos == null || _filteredLocalPos.Length != n) _filteredLocalPos = new Vector3[n];
-        }
 
         private void LateUpdate()
         {
-            InitializeIfNeeded(force: false);
-            if (!_initialized) return;
-
+            if (!Initialize()) return;
             float dt = Time.deltaTime;
             if (dt <= 0f) return;
 
             int n = spine.Count;
-            if (n <= 0) return;
+            Quaternion[] rawTargetDeltas = new Quaternion[n];
+            bool anyProviderNeedsContinuous = false;
 
-            // 1) Build raw target pose for each joint from providers (ABSOLUTE local targets).
-            Quaternion[] rawTargetLocalRot = new Quaternion[n];
-            Vector3[] rawTargetLocalPos = new Vector3[n];
-
+            // 1. 收集增量 (Delta = Inv(Bind) * Target)
             for (int i = 0; i < n; i++)
             {
-                var joint = spine.GetJoint(i);
-                if (joint == null || joint.bone == null)
-                {
-                    rawTargetLocalRot[i] = Quaternion.identity;
-                    rawTargetLocalPos[i] = Vector3.zero;
-                    continue;
-                }
-
                 Quaternion bindRot = _bindLocalRot[i];
-                Vector3 bindPos = _bindLocalPos[i];
-
                 Vector3 rotVecSum = Vector3.zero;
                 float rotWSum = 0f;
 
-                Vector3 posSum = Vector3.zero;
-                float posWSum = 0f;
-
-                for (int p = 0; p < providers.Count; p++)
+                foreach (var prov in providers)
                 {
-                    var prov = providers[p];
                     if (prov == null || !prov.isActiveAndEnabled) continue;
-
-                    if (prov.Evaluate(i, spine, bindRot, bindPos, out Quaternion targetRot, out Vector3 targetPos, out float w))
+                    if (prov.RequiresContinuousPath) anyProviderNeedsContinuous = true;
+                    Transform bone = spine.GetBone(i);
+                    if (prov.Evaluate(i, spine, bone, bindRot, out Quaternion targetRot, out float w))
                     {
-                        w = Mathf.Clamp01(w) * Mathf.Clamp01(prov.globalWeight);
-                        if (w <= 0f) continue;
+                        w = Mathf.Clamp01(w * prov.globalWeight);
+                        if (w <= 1e-5f) continue;
 
-                        Quaternion dRot = targetRot * Quaternion.Inverse(bindRot); // delta from bind
+                        Quaternion dRot = Quaternion.Inverse(bindRot) * targetRot;
+                        if (dRot.w < 0f) dRot = new Quaternion(-dRot.x, -dRot.y, -dRot.z, -dRot.w);
                         rotVecSum += ToAxisAngleVector(dRot) * w;
                         rotWSum += w;
-
-                        Vector3 dPos = targetPos - bindPos;
-                        posSum += dPos * w;
-                        posWSum += w;
                     }
                 }
-
-                float rotWTotal = allowOverdriveWeight ? rotWSum : Mathf.Clamp01(rotWSum);
-                float posWTotal = allowOverdriveWeight ? posWSum : Mathf.Clamp01(posWSum);
-
-                Vector3 rotVec = (rotWSum > 1e-6f) ? ((rotVecSum / rotWSum) * rotWTotal) : Vector3.zero;
-                Vector3 dPosMean = (posWSum > 1e-6f) ? ((posSum / posWSum) * posWTotal) : Vector3.zero;
-
-                Quaternion deltaRot = (rotVec.sqrMagnitude > 1e-12f) ? FromAxisAngleVector(rotVec) : Quaternion.identity;
-                rawTargetLocalRot[i] = deltaRot * bindRot;
-                rawTargetLocalPos[i] = bindPos + dPosMean;
+                float totalW = Mathf.Clamp01(rotWSum);
+                Vector3 meanVec = (rotWSum > 1e-6f) ? (rotVecSum / rotWSum * totalW) : Vector3.zero;
+                rawTargetDeltas[i] = FromAxisAngleVector(meanVec);
             }
 
-            // 2) Cascaded propagation + damping (matches WavingTestRig)
-            bool chestToHip = (propagation == PropagationDirection.ChestToHip);
-            int start = chestToHip ? (n - 1) : 0;
-            int end = chestToHip ? -1 : n;
-            int step = chestToHip ? -1 : 1;
+            // 2. 级联传播逻辑
+            bool hipToChest = (propagation == PropagationDirection.HipToChest);
+            int start = hipToChest ? 0 : (n - 1);
+            int step = hipToChest ? 1 : -1;
+            int end = hipToChest ? n : -1;
 
-            for (int i = start; i != end; i += step)
+            for (int curr = start; curr != end; curr += step)
             {
-                var joint = spine.GetJoint(i);
-                if (joint == null || joint.bone == null) continue;
+                float hip01 = (float)curr / Mathf.Max(1, n - 1);
+                int upstream = hipToChest ? (curr - 1) : (curr + 1);
+                bool hasUpstream = upstream >= 0 && upstream < n;
 
-                float hip01 = spine.GetNormalizedFromHip01(i);
+                Quaternion targetDelta = rawTargetDeltas[curr];
 
-                int upstreamIndex = chestToHip ? (i + 1) : (i - 1);
-                bool hasUpstream = upstreamIndex >= 0 && upstreamIndex < n && spine.GetBoneHipToChest(upstreamIndex) != null;
-
-                Quaternion upstreamRot = hasUpstream ? _filteredLocalRot[upstreamIndex] : rawTargetLocalRot[i];
-                Vector3 upstreamPos = hasUpstream ? _filteredLocalPos[upstreamIndex] : rawTargetLocalPos[i];
-
-                Quaternion stageRotTarget = Quaternion.Slerp(rawTargetLocalRot[i], upstreamRot, propagationBlend);
-                Vector3 stagePosTarget = Vector3.Lerp(rawTargetLocalPos[i], upstreamPos, propagationBlend);
-
-                float rotHL = Mathf.Max(0.001f, rotationHalfLife) * Mathf.Max(0.01f, rotHalfLifeMul.Evaluate(hip01));
-                float posHL = Mathf.Max(0.001f, positionHalfLife) * Mathf.Max(0.01f, posHalfLifeMul.Evaluate(hip01));
-
-                float rotAlpha = HalfLifeToAlpha(rotHL, dt);
-                float posAlpha = HalfLifeToAlpha(posHL, dt);
-
-                _filteredLocalRot[i] = Quaternion.Slerp(_filteredLocalRot[i], stageRotTarget, rotAlpha);
-                _filteredLocalPos[i] = Vector3.Lerp(_filteredLocalPos[i], stagePosTarget, posAlpha);
-
-                // 3) Apply (WavingTestRig-style: definition weight at final apply)
-                Quaternion appliedRot = _filteredLocalRot[i];
-                Vector3 appliedPos = _filteredLocalPos[i];
-
-                if (applyDefinitionWeight)
+                if (hasUpstream)
                 {
-                    Quaternion bindRot = _bindLocalRot[i];
-                    Vector3 bindPos = _bindLocalPos[i];
-
-                    float w = Mathf.Clamp01(joint.weight);
-                    appliedRot = Quaternion.Slerp(bindRot, appliedRot, w);
-                    appliedPos = Vector3.Lerp(bindPos, appliedPos, w);
+                    Quaternion upDelta = _filteredDelta[upstream];
+                    // 路径锁定
+                    if (anyProviderNeedsContinuous && Quaternion.Dot(targetDelta, upDelta) < 0f)
+                    {
+                        targetDelta = new Quaternion(-targetDelta.x, -targetDelta.y, -targetDelta.z, -targetDelta.w);
+                    }
+                    // 混合传播姿态
+                    targetDelta = Quaternion.Slerp(targetDelta, upDelta, propagationBlend);
                 }
 
-                joint.bone.localRotation = appliedRot;
+                // 阻尼滤波
+                float hl = rotationHalfLife * rotHalfLifeMul.Evaluate(hip01);
+                _filteredDelta[curr] = Quaternion.Slerp(_filteredDelta[curr], targetDelta, HalfLifeToAlpha(hl, dt));
 
-                if (applyLocalPosition)
-                    joint.bone.localPosition = appliedPos;
-                else
-                    joint.bone.localPosition = _bindLocalPos[i];
+                // 核心应用修复：
+                Quaternion applyRotation = _filteredDelta[curr];
+                
+                if (hipToChest && hasUpstream)
+                {
+                    // 只有顺着 Unity 层级(Parent -> Child)传播时，才需要执行差分抵消。
+                    // 否则子关节会叠加父关节的旋转。
+                    Quaternion upDelta = _filteredDelta[upstream];
+                    if (anyProviderNeedsContinuous && Quaternion.Dot(applyRotation, upDelta) < 0f)
+                        applyRotation = new Quaternion(-applyRotation.x, -applyRotation.y, -applyRotation.z, -applyRotation.w);
+                    
+                    applyRotation = Quaternion.Inverse(upDelta) * applyRotation;
+                }
+                // 注意：在 ChestToHip (逆层级) 模式下，直接应用 applyRotation。
+                // 因为父级(Hip)的旋转在物理层级上会自动向下传递，逻辑传播已经处理了平滑度。
+
+                spine.GetBone(curr).localRotation = _bindLocalRot[curr] * applyRotation;
             }
+        }
 
-            if (drawDebug && providers != null)
+        private bool Initialize()
+        {
+            if (_initialized && spine != null && _bindLocalRot.Length == spine.Count) return true;
+            if (spine == null || spine.Count == 0) return false;
+            int n = spine.Count;
+            _bindLocalRot = new Quaternion[n];
+            _filteredDelta = new Quaternion[n];
+            for (int i = 0; i < n; i++)
             {
-                // Intentionally minimal: providers can draw their own debug if desired.
+                if (spine.TryGetRestLocalRotation(i, out Quaternion r)) _bindLocalRot[i] = r;
+                _filteredDelta[i] = Quaternion.identity;
             }
+            _initialized = true;
+            return true;
         }
 
-        private static float HalfLifeToAlpha(float halfLife, float dt)
-        {
-            // alpha = 1 - exp(-ln(2) * dt / halfLife)
-            return 1f - Mathf.Exp(-0.69314718056f * dt / Mathf.Max(1e-6f, halfLife));
-        }
-
-        // Quaternion delta -> axis-angle vector (radians * axis)
-        private static Vector3 ToAxisAngleVector(Quaternion q)
-        {
-            if (q.w > 1f) q.Normalize();
-            q.ToAngleAxis(out float angleDeg, out Vector3 axis);
-
-            if (axis.sqrMagnitude < 1e-12f) return Vector3.zero;
-
-            // map angle to [-180,180] for stability
-            if (angleDeg > 180f) angleDeg -= 360f;
-
-            float angleRad = angleDeg * Mathf.Deg2Rad;
-            axis.Normalize();
-            return axis * angleRad;
-        }
-
-        // axis-angle vector -> Quaternion delta
-        private static Quaternion FromAxisAngleVector(Vector3 v)
-        {
-            float angleRad = v.magnitude;
-            if (angleRad < 1e-8f) return Quaternion.identity;
-
-            Vector3 axis = v / angleRad;
-            float angleDeg = angleRad * Mathf.Rad2Deg;
-            return Quaternion.AngleAxis(angleDeg, axis);
-        }
+        private float HalfLifeToAlpha(float hl, float dt) => 1f - Mathf.Exp(-0.693f * dt / Mathf.Max(1e-6f, hl));
+        private Vector3 ToAxisAngleVector(Quaternion q) { q.ToAngleAxis(out float a, out Vector3 v); return (v.sqrMagnitude < 1e-12f) ? Vector3.zero : v.normalized * (a * Mathf.Deg2Rad); }
+        private Quaternion FromAxisAngleVector(Vector3 v) => v.magnitude < 1e-8f ? Quaternion.identity : Quaternion.AngleAxis(v.magnitude * Mathf.Rad2Deg, v.normalized);
     }
 }
-

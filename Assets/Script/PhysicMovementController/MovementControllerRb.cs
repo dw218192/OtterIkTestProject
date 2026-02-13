@@ -223,6 +223,7 @@ public class MovementControllerRB : MonoBehaviour
             isDragging = false;
             zone = MoveZone.None;
             targetSpeed = 0f;
+            radiusPxSm = 0f;
 
             // Stop UI arrow immediately (prevents "stuck arrow")
             ui?.HideArrow();
