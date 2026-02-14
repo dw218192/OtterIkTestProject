@@ -111,6 +111,12 @@ public class IKStrokeTrajectory_V2 : MonoBehaviour
     private Vector3 lastLoggedIdleLeftFront = Vector3.forward;
     private Vector3 lastLoggedIdleRightFront = Vector3.forward;
 
+    // Runtime solved frame vectors for external controllers (e.g. IKStrokeController consistency gate).
+    public Vector3 LeftSolvedFront => debugLeftFront;
+    public Vector3 RightSolvedFront => debugRightFront;
+    public Vector3 LeftSolvedUp => debugLeftUp;
+    public Vector3 RightSolvedUp => debugRightUp;
+
     private static float ExpAlpha(float sharpness, float dt)
     {
         return 1f - Mathf.Exp(-Mathf.Max(0f, sharpness) * Mathf.Max(0f, dt));

@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Serialization;
 
 /// <summary>
 /// IKStrokeController
@@ -8,8 +9,8 @@ using UnityEngine;
 /// - IKStrokeTrajectory_V2: solved per-side trajectory frame and curve sampling.
 ///
 /// Per side:
-/// 1) When side becomes outer -> start stroke and accumulate Alpha.
-/// 2) Instant Alpha magnitude maps to curve progress (0..1), no delta accumulation.
+/// 1) When side becomes outer -> start stroke and accumulate phase angle.
+/// 2) Accumulated phase angle (with direction-consistency gate) maps to curve progress (0..1).
 /// 3) EventB: one full loop done -> notify listeners and optionally continue next loop.
 /// 4) EventA: side loses outer state before loop complete -> interrupt and return to rest.
 /// </summary>
@@ -27,13 +28,24 @@ public class IKStrokeController : MonoBehaviour
     public Transform leftLimbIkTarget;
     public Transform rightLimbIkTarget;
 
-    [Header("Alpha -> Stroke Mapping")]
-    [Tooltip("Absolute Alpha(deg) needed to reach one full loop progress (progress=1).")]
-    [Min(1f)] public float alphaForFullLoopDeg = 70f;
-    [Tooltip("Smoothness for mapping Alpha to progress; higher = faster response, lower = more stable.")]
-    [Min(0f)] public float alphaToProgressSharpness = 24f;
-    [Tooltip("Ignore tiny Alpha near zero to suppress noise.")]
-    [Min(0f)] public float alphaDeadzoneDeg = 1f;
+    [Header("Phase Accumulation Mapping")]
+    [FormerlySerializedAs("alphaForFullLoopDeg")]
+    [Tooltip("Accumulated phase angle(deg) needed to reach one full loop progress (progress=1).")]
+    [Min(1f)] public float phaseDegreesPerLoop = 70f;
+    [FormerlySerializedAs("alphaToProgressSharpness")]
+    [Tooltip("Smoothness for mapping accumulated phase to progress; higher = faster response, lower = more stable.")]
+    [Min(0f)] public float phaseToProgressSharpness = 24f;
+    [FormerlySerializedAs("alphaDeadzoneDeg")]
+    [Tooltip("Ignore tiny phase-driving spin speed near zero (deg/s).")]
+    [Min(0f)] public float minAccumSpinDegPerSec = 1f;
+    [Tooltip("Cap accumulated alpha speed to prevent spikes.")]
+    [FormerlySerializedAs("maxAccumulationSpeedDegPerSec")]
+    [Min(1f)] public float maxPhaseAccumulationSpeedDegPerSec = 180f;
+    [Header("Direction Consistency Gate (Trajectory->StableBasis)")]
+    [Tooltip("If enabled, phase only accumulates while solved trajectory front/up stay locally stable in StableBasis space.")]
+    public bool useTrajectoryDirectionConsistencyGate = true;
+    [Range(0.3f, 1f)] public float consistencyEnterDot = 0.96f;
+    [Range(0.2f, 1f)] public float consistencyExitDot = 0.9f;
     [Range(0.5f, 1f)] public float eventBTriggerProgress = 0.98f;
     [Range(0f, 0.8f)] public float eventBRearmProgress = 0.2f;
 
@@ -51,27 +63,46 @@ public class IKStrokeController : MonoBehaviour
 
     [Header("Debug")]
     public bool logEvents = false;
+    public bool logSpinDiagnostics = false;
+    [Range(1, 240)] public int spinLogEveryNFrames = 20;
     public bool drawDebug = true;
     public float debugSphereRadius = 0.025f;
     public Color debugLeftColor = new Color(0.25f, 0.85f, 1f, 1f);
     public Color debugRightColor = new Color(1f, 0.6f, 0.2f, 1f);
-    [Header("Runtime Alpha (deg)")]
-    [Tooltip("Current left-side absolute Alpha in degrees (runtime).")]
-    public float leftAlphaDegree;
-    [Tooltip("Current right-side absolute Alpha in degrees (runtime).")]
-    public float rightAlphaDegree;
+    [Header("Runtime Angle (deg)")]
+    [FormerlySerializedAs("leftAlphaDegree")]
+    [Tooltip("Current left-side absolute shoulder-lag angle in degrees (runtime).")]
+    public float leftCurrentAngleDeg;
+    [FormerlySerializedAs("rightAlphaDegree")]
+    [Tooltip("Current right-side absolute shoulder-lag angle in degrees (runtime).")]
+    public float rightCurrentAngleDeg;
+    [Header("Runtime Accumulation (deg)")]
+    [Tooltip("Current left-side accumulated phase angle in degrees (runtime).")]
+    public float leftAccumulatedPhaseDeg;
+    [Tooltip("Current right-side accumulated phase angle in degrees (runtime).")]
+    public float rightAccumulatedPhaseDeg;
+    [Header("Runtime Direction Gate")]
+    public bool leftDirectionConsistent = true;
+    public bool rightDirectionConsistent = true;
 
     public float LeftProgress01 => leftState.progress01;
     public float RightProgress01 => rightState.progress01;
-    public float LeftAccumAlphaDeg => leftState.alphaAbsDeg;
-    public float RightAccumAlphaDeg => rightState.alphaAbsDeg;
+    public float LeftAccumPhaseDeg => leftState.accumulatedPhaseDeg;
+    public float RightAccumPhaseDeg => rightState.accumulatedPhaseDeg;
+    public float LeftAccumAlphaDeg => LeftAccumPhaseDeg;
+    public float RightAccumAlphaDeg => RightAccumPhaseDeg;
 
     private struct SideState
     {
         public bool isStroking;
         public bool lockUntilOuterRelease;
         public float progress01;
-        public float alphaAbsDeg;
+        public float currentAngleDeg;
+        public float accumulatedPhaseDeg;
+        public bool directionConsistent;
+        public bool hasPrevLocalPose;
+        public Vector3 prevLocalFront;
+        public Vector3 prevLocalUp;
         public bool eventBArmed;
         public float eventBCooldownTimer;
         public Vector3 currentTargetWorld;
@@ -148,23 +179,55 @@ public class IKStrokeController : MonoBehaviour
                 StartStroke(isLeft, ref state);
             }
 
-            if (TryGetSignedAlphaDeg(isLeft, out float signedAlphaDeg))
+            if (TryGetSignedAngleDeg(isLeft, out float signedAngleDeg))
             {
-                float absAlpha = Mathf.Abs(signedAlphaDeg);
-                state.alphaAbsDeg = absAlpha >= alphaDeadzoneDeg ? absAlpha : 0f;
-                if (isLeft) leftAlphaDegree = state.alphaAbsDeg;
-                else rightAlphaDegree = state.alphaAbsDeg;
+                float absAngle = Mathf.Abs(signedAngleDeg);
+                state.currentAngleDeg = absAngle;
+                if (isLeft) leftCurrentAngleDeg = state.currentAngleDeg;
+                else rightCurrentAngleDeg = state.currentAngleDeg;
             }
             else
             {
-                state.alphaAbsDeg = 0f;
-                if (isLeft) leftAlphaDegree = 0f;
-                else rightAlphaDegree = 0f;
+                state.currentAngleDeg = 0f;
+                if (isLeft) leftCurrentAngleDeg = 0f;
+                else rightCurrentAngleDeg = 0f;
             }
 
-            float fullLoopAlpha = Mathf.Max(1f, alphaForFullLoopDeg);
-            float mappedProgress = Mathf.Clamp01(state.alphaAbsDeg / fullLoopAlpha);
-            state.progress01 = Mathf.Lerp(state.progress01, mappedProgress, ExpAlpha(alphaToProgressSharpness, dt));
+            // Phase accumulation is driven by body angular spin, not by clamped lag-angle delta.
+            bool directionOk = EvaluateDirectionConsistency(isLeft, ref state);
+            if (isLeft) leftDirectionConsistent = directionOk;
+            else rightDirectionConsistent = directionOk;
+
+            bool hasSpinSample = TryGetSpinDegPerSec(isLeft, out float projectedSpinDegPerSec, out float totalAngularDegPerSec);
+
+            if (directionOk && hasSpinSample)
+            {
+                if (totalAngularDegPerSec >= minAccumSpinDegPerSec)
+                {
+                    float maxStep = Mathf.Max(1f, maxPhaseAccumulationSpeedDegPerSec) * dt;
+                    float step = totalAngularDegPerSec * dt;
+                    state.accumulatedPhaseDeg += Mathf.Min(step, maxStep);
+                }
+            }
+            if (isLeft) leftAccumulatedPhaseDeg = state.accumulatedPhaseDeg;
+            else rightAccumulatedPhaseDeg = state.accumulatedPhaseDeg;
+
+            if (logSpinDiagnostics &&
+                Application.isPlaying &&
+                spinLogEveryNFrames > 0 &&
+                (Time.frameCount % spinLogEveryNFrames == 0))
+            {
+                Debug.Log(
+                    $"[IKStrokeController][SpinDiag][{(isLeft ? "L" : "R")}] " +
+                    $"outer={outerNow}, dirOK={directionOk}, hasSpin={hasSpinSample}, " +
+                    $"projSpinDegPerSec={projectedSpinDegPerSec:F2}, totalAngDegPerSec={totalAngularDegPerSec:F2}, " +
+                    $"minSpin={minAccumSpinDegPerSec:F2}, accum={state.accumulatedPhaseDeg:F2}, progress={state.progress01:F3}",
+                    this);
+            }
+
+            float fullLoopPhase = Mathf.Max(1f, phaseDegreesPerLoop);
+            float mappedProgress = Mathf.Clamp01(state.accumulatedPhaseDeg / fullLoopPhase);
+            state.progress01 = Mathf.Lerp(state.progress01, mappedProgress, ExpAlpha(phaseToProgressSharpness, dt));
 
             Vector3 strokeTarget = EvaluateTrajectoryWorld(isLeft, state.progress01, restWorld);
             MoveTargetTowards(ref state, ikTarget, strokeTarget, strokeFollowSharpness, dt);
@@ -185,8 +248,12 @@ public class IKStrokeController : MonoBehaviour
                 state.eventBArmed = false;
                 state.eventBCooldownTimer = 0f;
                 state.progress01 = 0f;
-                state.alphaAbsDeg = 0f;
-                dynamicSource?.OnStrokeLoopCompleted(isLeft);
+                state.currentAngleDeg = 0f;
+                state.accumulatedPhaseDeg = 0f;
+                state.directionConsistent = true;
+                state.hasPrevLocalPose = false;
+                if (isLeft) leftAccumulatedPhaseDeg = 0f;
+                else rightAccumulatedPhaseDeg = 0f;
                 OnEventBLoopCompleted?.Invoke(isLeft);
                 if (logEvents) Debug.Log($"[IKStrokeController] EventB loop completed ({(isLeft ? "L" : "R")})", this);
             }
@@ -198,14 +265,21 @@ public class IKStrokeController : MonoBehaviour
                 // Event A: outer side changed/released before one-loop completion.
                 state.isStroking = false;
                 state.eventBArmed = true;
+                state.directionConsistent = true;
+                state.hasPrevLocalPose = false;
                 OnEventAInterrupted?.Invoke(isLeft);
                 if (logEvents) Debug.Log($"[IKStrokeController] EventA interrupted ({(isLeft ? "L" : "R")})", this);
             }
 
             state.progress01 = 0f;
-            state.alphaAbsDeg = 0f;
-            if (isLeft) leftAlphaDegree = 0f;
-            else rightAlphaDegree = 0f;
+            state.currentAngleDeg = 0f;
+            state.accumulatedPhaseDeg = 0f;
+            if (isLeft) leftCurrentAngleDeg = 0f;
+            else rightCurrentAngleDeg = 0f;
+            if (isLeft) leftAccumulatedPhaseDeg = 0f;
+            else rightAccumulatedPhaseDeg = 0f;
+            if (isLeft) leftDirectionConsistent = true;
+            else rightDirectionConsistent = true;
             MoveTargetTowards(ref state, ikTarget, restWorld, returnToRestSharpness, dt);
         }
     }
@@ -214,7 +288,10 @@ public class IKStrokeController : MonoBehaviour
     {
         state.isStroking = true;
         state.progress01 = 0f;
-        state.alphaAbsDeg = 0f;
+        state.currentAngleDeg = 0f;
+        state.accumulatedPhaseDeg = 0f;
+        state.directionConsistent = true;
+        state.hasPrevLocalPose = false;
         // Do not force-arm here; keep hysteresis state from previous loop.
         if (logEvents) Debug.Log($"[IKStrokeController] Stroke start ({(isLeft ? "L" : "R")})", this);
     }
@@ -268,9 +345,9 @@ public class IKStrokeController : MonoBehaviour
         return transform.position;
     }
 
-    private bool TryGetSignedAlphaDeg(bool isLeft, out float signedAlphaDeg)
+    private bool TryGetSignedAngleDeg(bool isLeft, out float signedAngleDeg)
     {
-        signedAlphaDeg = 0f;
+        signedAngleDeg = 0f;
         if (!dynamicSource) return false;
 
         Transform shoulder = isLeft ? dynamicSource.leftShoulder : dynamicSource.rightShoulder;
@@ -281,7 +358,7 @@ public class IKStrokeController : MonoBehaviour
         if (dir.sqrMagnitude < 1e-10f) return false;
         Vector3 dirN = dir.normalized;
 
-        // Keep Alpha definition consistent with DynamicIndirectIk_V2::UpdateAnchor angleL:
+        // Keep angle definition consistent with DynamicIndirectIk_V2::UpdateAnchor angleL:
         // angle between per-side "rest side" direction and shoulder->lag direction.
         Quaternion basis = dynamicSource.StableBasis;
         Vector3 side = isLeft ? -(basis * Vector3.right) : (basis * Vector3.right);
@@ -296,8 +373,68 @@ public class IKStrokeController : MonoBehaviour
 
         float sign = Mathf.Sign(Vector3.Dot(Vector3.Cross(side, dirN), signAxis));
         if (Mathf.Abs(sign) < 1e-6f) sign = 1f;
-        signedAlphaDeg = unsignedAngle * sign;
+        signedAngleDeg = unsignedAngle * sign;
         return true;
+    }
+
+    private bool TryGetSpinDegPerSec(bool isLeft, out float projectedSpinDegPerSec, out float totalAngularDegPerSec)
+    {
+        projectedSpinDegPerSec = 0f;
+        totalAngularDegPerSec = 0f;
+        if (!dynamicSource) return false;
+
+        Vector3 angVel = dynamicSource.CurrentAngularVel;
+        totalAngularDegPerSec = angVel.magnitude * Mathf.Rad2Deg;
+
+        Quaternion basis = dynamicSource.StableBasis;
+        Vector3 spinAxis = basis * Vector3.forward;
+        if (spinAxis.sqrMagnitude < 1e-10f) spinAxis = basis * Vector3.up;
+        if (spinAxis.sqrMagnitude < 1e-10f) spinAxis = Vector3.up;
+        spinAxis.Normalize();
+
+        float spin = Vector3.Dot(angVel, spinAxis) * Mathf.Rad2Deg;
+
+        // Mirror sign on right side to keep comparable convention between sides.
+        projectedSpinDegPerSec = isLeft ? spin : -spin;
+        return totalAngularDegPerSec > 1e-6f;
+    }
+
+    private bool EvaluateDirectionConsistency(bool isLeft, ref SideState state)
+    {
+        if (!useTrajectoryDirectionConsistencyGate) return true;
+        if (!trajectorySource || !dynamicSource) return true;
+
+        Vector3 worldFront = isLeft ? trajectorySource.LeftSolvedFront : trajectorySource.RightSolvedFront;
+        Vector3 worldUp = isLeft ? trajectorySource.LeftSolvedUp : trajectorySource.RightSolvedUp;
+        if (worldFront.sqrMagnitude < 1e-10f || worldUp.sqrMagnitude < 1e-10f) return state.directionConsistent;
+
+        Quaternion stable = dynamicSource.StableBasis;
+        if (stable == Quaternion.identity) return state.directionConsistent;
+        Quaternion invStable = Quaternion.Inverse(stable);
+        Vector3 localFront = (invStable * worldFront).normalized;
+        Vector3 localUp = (invStable * worldUp).normalized;
+        if (localFront.sqrMagnitude < 1e-10f || localUp.sqrMagnitude < 1e-10f) return state.directionConsistent;
+
+        if (!state.hasPrevLocalPose)
+        {
+            state.prevLocalFront = localFront;
+            state.prevLocalUp = localUp;
+            state.hasPrevLocalPose = true;
+            state.directionConsistent = true;
+            return true;
+        }
+
+        float enter = Mathf.Clamp(consistencyEnterDot, -1f, 1f);
+        float exit = Mathf.Clamp(consistencyExitDot, -1f, 1f);
+        if (exit > enter) exit = enter;
+
+        float dotF = Vector3.Dot(state.prevLocalFront, localFront);
+        float dotU = Vector3.Dot(state.prevLocalUp, localUp);
+        bool stableNow = state.directionConsistent ? (dotF >= exit && dotU >= exit) : (dotF >= enter && dotU >= enter);
+        state.directionConsistent = stableNow;
+        state.prevLocalFront = localFront;
+        state.prevLocalUp = localUp;
+        return stableNow;
     }
 
     private void OnDrawGizmos()

@@ -12,13 +12,6 @@ using UnityEngine;
 [DefaultExecutionOrder(101)]
 public class DynamicIndirectIk_V2 : MonoBehaviour
 {
-    public enum StrokeLoopResetMode
-    {
-        ResetToLagTarget = 0,
-        ResetToResidualAngle = 1,
-        ResetToResidualDistance = 2
-    }
-
     [Header("输入源 (物理对齐)")]
     public SpineDecouplerWithShadows spineSource;
     public int rootJointIndex = 8;
@@ -42,12 +35,6 @@ public class DynamicIndirectIk_V2 : MonoBehaviour
     public float recoverSpeed = 20f;
     [Tooltip("outer 期间超过 maxAngleL 时，以该速度快速拉回到角度上限附近")]
     public float outerOverAngleLerpSpeed = 40f;
-
-    [Header("与 IKStrokeController 的 EventB 联动")]
-    [Tooltip("一圈完成时，外侧 K 点的重定位策略。")]
-    public StrokeLoopResetMode strokeLoopResetMode = StrokeLoopResetMode.ResetToLagTarget;
-    [Min(0f)] public float strokeLoopResidualAngleDeg = 3f;
-    [Min(0f)] public float strokeLoopResidualDistance = 0.03f;
 
     [Header("Gizmo")]
     public bool drawGizmos = true;
@@ -251,57 +238,6 @@ public class DynamicIndirectIk_V2 : MonoBehaviour
         Vector3 side = isLeft ? -(basis * Vector3.right) : (basis * Vector3.right);
         if (isLeft) worldLeftPoint = leftShoulder.position + side * armOffset;
         else worldRightPoint = rightShoulder.position + side * armOffset;
-    }
-
-    /// <summary>
-    /// Called by IKStrokeController on EventB (one full stroke loop completed).
-    /// Repositions current side K point to lag-target (or lag-target + small offset).
-    /// </summary>
-    public void OnStrokeLoopCompleted(bool isLeft)
-    {
-        if (!isInitialized)
-        {
-            Initialize();
-            if (!isInitialized) return;
-        }
-
-        Transform shoulder = isLeft ? leftShoulder : rightShoulder;
-        if (!shoulder) return;
-
-        Quaternion basis = cachedStableRot == Quaternion.identity ? CreateStableBasis() : cachedStableRot;
-        Vector3 side = isLeft ? -(basis * Vector3.right) : (basis * Vector3.right);
-        if (side.sqrMagnitude < 1e-10f) side = isLeft ? -Vector3.right : Vector3.right;
-        side.Normalize();
-
-        Vector3 targetPos = shoulder.position + side * armOffset;
-        Vector3 current = isLeft ? worldLeftPoint : worldRightPoint;
-        Vector3 currentDir = current - shoulder.position;
-        if (currentDir.sqrMagnitude < 1e-10f) currentDir = side;
-        currentDir.Normalize();
-
-        Vector3 axis = basis * Vector3.forward;
-        if (axis.sqrMagnitude < 1e-10f) axis = basis * Vector3.up;
-        if (axis.sqrMagnitude < 1e-10f) axis = Vector3.up;
-        axis.Normalize();
-
-        if (strokeLoopResetMode == StrokeLoopResetMode.ResetToResidualAngle)
-        {
-            float currentAngle = Vector3.Angle(side, currentDir);
-            float residual = Mathf.Clamp(strokeLoopResidualAngleDeg, 0f, maxAngleL);
-            float keepAngle = Mathf.Min(currentAngle, residual);
-            float sign = Mathf.Sign(Vector3.Dot(Vector3.Cross(side, currentDir), axis));
-            if (Mathf.Abs(sign) < 1e-6f) sign = 1f;
-            Vector3 keptDir = Quaternion.AngleAxis(sign * keepAngle, axis) * side;
-            targetPos = shoulder.position + keptDir.normalized * armOffset;
-        }
-        else if (strokeLoopResetMode == StrokeLoopResetMode.ResetToResidualDistance)
-        {
-            float residualDistance = Mathf.Max(0f, strokeLoopResidualDistance);
-            targetPos = shoulder.position + currentDir * residualDistance;
-        }
-
-        if (isLeft) worldLeftPoint = targetPos;
-        else worldRightPoint = targetPos;
     }
 
     private void OnDrawGizmos()
