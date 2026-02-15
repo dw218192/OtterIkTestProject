@@ -53,7 +53,8 @@ namespace OtterIK.Neo.Experiment
             float[] rollTargets = new float[n];
             
             var mover = decoupler.GetComponentInParent<MovementControllerRB>();
-            bool isDragging = mover != null && mover.IsDragging();
+            float aimBlend = mover != null ? mover.GetAimBlend01() : 0f; // dragging=1, release-align decays to 0
+            bool aimActive = aimBlend > 1e-4f;
 
             for (int i = 0; i < n; i++)
             {
@@ -100,10 +101,11 @@ namespace OtterIK.Neo.Experiment
                 // 应用混合结果
                 rollTargets[i] = dominantRoll;
 
-                if (isDragging && ypWeightSum > 1e-6f)
+                if (aimActive && ypWeightSum > 1e-6f)
                 {
                     float totalW = Mathf.Clamp01(ypWeightSum);
-                    Vector3 meanVec = (ypRotVecSum / ypWeightSum) * totalW;
+                    // Multiply by aimBlend so intent releases smoothly instead of snapping back to identity.
+                    Vector3 meanVec = (ypRotVecSum / ypWeightSum) * totalW * aimBlend;
                     yawPitchTargets[i] = Quaternion.AngleAxis(meanVec.magnitude * Mathf.Rad2Deg, meanVec.normalized);
                 }
                 else

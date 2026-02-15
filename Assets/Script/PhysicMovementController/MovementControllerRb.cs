@@ -98,6 +98,21 @@ public class MovementControllerRB : MonoBehaviour
     [Header("Facing (root yaw via Rigidbody)")]
     [SerializeField] private float faceSmoothing = 20f;
 
+    [Header("Release auto align")]
+    [Tooltip("After mouse release, keep rotating body toward the last intent direction for a short time.")]
+    [SerializeField] private bool enableReleaseAutoAlign = true;
+    [Tooltip("Maximum duration of auto-align after release.")]
+    [SerializeField] private float releaseAlignDuration = 0.9f;
+    [Tooltip("Blend weight (0..1) over releaseAlignDuration. X=normalized time since release, Y=weight applied to turning/alignment intent.")]
+    [SerializeField] private AnimationCurve releaseAlignWeightCurve = AnimationCurve.EaseInOut(0f, 1f, 1f, 0f);
+    [Tooltip("Stop auto-align when facing is within this angle (deg) of the release direction.")]
+    [Range(0.1f, 30f)]
+    [SerializeField] private float releaseAlignStopAngleDeg = 2f;
+    [Tooltip("Optional smoothing for release auto-align. <= 0 uses faceSmoothing.")]
+    [SerializeField] private float releaseAlignSmoothing = 16f;
+    [Tooltip("Optional max yaw turn rate during release auto-align (deg/sec). 0 disables and uses smoothing only.")]
+    [SerializeField] private float releaseAlignMaxTurnRateDegPerSec = 180f;
+
     [Header("Fast stop")]
     [SerializeField] private float idleBrakeAccel = 12f;
     [SerializeField] private float stopSpeedEpsilon = 0.10f;
@@ -155,6 +170,12 @@ public class MovementControllerRB : MonoBehaviour
     // For pre-kick preview
     private float nextKickTime;
 
+    // Release auto-align runtime
+    private bool releaseAlignActive;
+    private float releaseAlignTimer;
+    private Vector3 releaseAlignDir = Vector3.forward;
+    private Vector3 releaseAlignSteerDir = Vector3.forward;
+
     // Debug/compat getters
     private float lastKickRate;     // derived cadence (Hz), not a setting
     private float lastKickImpulse;
@@ -202,6 +223,7 @@ public class MovementControllerRB : MonoBehaviour
     private void FixedUpdate()
     {
         UpdateSteerDir(Time.fixedDeltaTime);
+        UpdateReleaseAutoAlign(Time.fixedDeltaTime);
         UpdateFacing();
         StepRhythm(Time.fixedDeltaTime);
         ApplyIdleBrakeAndPlaneLock();
@@ -220,6 +242,7 @@ public class MovementControllerRB : MonoBehaviour
         }
         else if (Input.GetMouseButtonUp(0))
         {
+            bool hadDrag = isDragging;
             isDragging = false;
             zone = MoveZone.None;
             targetSpeed = 0f;
@@ -227,6 +250,8 @@ public class MovementControllerRB : MonoBehaviour
 
             // Stop UI arrow immediately (prevents "stuck arrow")
             ui?.HideArrow();
+
+            if (hadDrag) BeginReleaseAutoAlign();
         }
 
         if (!isDragging) return;
@@ -343,18 +368,131 @@ public class MovementControllerRB : MonoBehaviour
     private void UpdateFacing()
     {
         if (rb == null) return;
-        if (faceSmoothing <= 0f) return;
-        if (!isDragging) return;
 
-        // Face along steerDir (matches propulsion direction inertia)
         Vector3 dir = steerDir;
+        float smoothing = faceSmoothing;
+
+        if (!isDragging)
+        {
+            if (!releaseAlignActive) return;
+            float w = GetAimBlend01();
+            if (w <= 1e-4f) return;
+
+            // Ease-out: as w decays, rotation response becomes gentler (less "rigid snap").
+            dir = releaseAlignSteerDir;
+            smoothing = releaseAlignSmoothing > 0f ? releaseAlignSmoothing : faceSmoothing;
+            smoothing *= w;
+        }
+
+        if (smoothing <= 0f) return;
+
+        // Dragging: face steerDir. Released: face releaseAlignDir for a short window.
         dir.y = 0f;
         if (dir.sqrMagnitude < 1e-6f) return;
         dir.Normalize();
 
         Quaternion target = Quaternion.LookRotation(dir, Vector3.up);
-        float k = 1f - Mathf.Exp(-faceSmoothing * Time.fixedDeltaTime);
+        float k = 1f - Mathf.Exp(-smoothing * Time.fixedDeltaTime);
         rb.MoveRotation(Quaternion.Slerp(rb.rotation, target, k));
+    }
+
+    private void BeginReleaseAutoAlign()
+    {
+        if (!enableReleaseAutoAlign)
+        {
+            releaseAlignActive = false;
+            return;
+        }
+
+        Vector3 dir = worldDir;
+        dir.y = 0f;
+        if (dir.sqrMagnitude < 1e-6f)
+        {
+            dir = steerDir;
+            dir.y = 0f;
+        }
+        if (dir.sqrMagnitude < 1e-6f)
+        {
+            dir = transform.forward;
+            dir.y = 0f;
+        }
+        if (dir.sqrMagnitude < 1e-6f)
+        {
+            releaseAlignActive = false;
+            return;
+        }
+
+        releaseAlignDir = dir.normalized;
+        // Start from current facing to avoid an instantaneous target snap.
+        releaseAlignSteerDir = transform.forward;
+        releaseAlignSteerDir.y = 0f;
+        if (releaseAlignSteerDir.sqrMagnitude < 1e-6f) releaseAlignSteerDir = releaseAlignDir;
+        releaseAlignSteerDir.Normalize();
+        releaseAlignTimer = 0f;
+        releaseAlignActive = true;
+    }
+
+    private void UpdateReleaseAutoAlign(float dt)
+    {
+        if (!releaseAlignActive) return;
+        if (isDragging)
+        {
+            releaseAlignActive = false;
+            return;
+        }
+
+        releaseAlignTimer += Mathf.Max(0f, dt);
+        float maxDuration = Mathf.Max(0.05f, releaseAlignDuration);
+        if (releaseAlignTimer >= maxDuration)
+        {
+            releaseAlignActive = false;
+            return;
+        }
+
+        // Soft steer toward release direction with optional turn-rate cap (gives "inertia" feel).
+        float turnRate = Mathf.Max(0f, releaseAlignMaxTurnRateDegPerSec);
+        if (turnRate > 1e-3f)
+        {
+            float maxRad = Mathf.Deg2Rad * turnRate * Mathf.Max(1e-5f, dt);
+            releaseAlignSteerDir = Vector3.RotateTowards(releaseAlignSteerDir, releaseAlignDir, maxRad, 0f);
+            releaseAlignSteerDir.y = 0f;
+            if (releaseAlignSteerDir.sqrMagnitude > 1e-6f) releaseAlignSteerDir.Normalize();
+        }
+
+        Vector3 fwd = transform.forward;
+        fwd.y = 0f;
+        if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
+        fwd.Normalize();
+
+        float angle = Vector3.Angle(fwd, releaseAlignDir);
+        if (angle <= Mathf.Clamp(releaseAlignStopAngleDeg, 0.1f, 45f))
+            releaseAlignActive = false;
+    }
+
+    /// <summary>
+    /// 0..1 blend for "aim intent" used by other systems (spine/neck).
+    /// Dragging => 1. After release => decays to 0 according to curve over releaseAlignDuration.
+    /// </summary>
+    public float GetAimBlend01()
+    {
+        if (isDragging) return 1f;
+        if (!releaseAlignActive) return 0f;
+
+        float dur = Mathf.Max(0.001f, releaseAlignDuration);
+        float t01 = Mathf.Clamp01(releaseAlignTimer / dur);
+        float w = releaseAlignWeightCurve != null ? releaseAlignWeightCurve.Evaluate(t01) : (1f - t01);
+        return Mathf.Clamp01(w);
+    }
+
+    /// <summary>
+    /// During release auto-align, this is the softly-steered direction toward the last intent.
+    /// Otherwise returns current steerDir (drag) or worldDir (idle).
+    /// </summary>
+    public Vector3 GetAimWorldDir()
+    {
+        if (isDragging) return steerDir;
+        if (releaseAlignActive) return releaseAlignSteerDir;
+        return worldDir;
     }
 
     // ---------------- Rhythm + Propulsion (no frequency settings) ----------------
