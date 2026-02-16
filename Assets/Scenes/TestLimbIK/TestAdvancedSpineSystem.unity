@@ -169,11 +169,32 @@ MonoBehaviour:
   m_GameObject: {fileID: 11020154}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 23af663428566b249ab068e80466d745, type: 3}
+  m_Script: {fileID: 11500000, guid: 02bbdce0e28c55344ab8e3bac18285c7, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  provider: {fileID: 1091441946}
-  testKey: 32
+  provider: {fileID: 1091441947}
+  demand01: 1
+  kickDuration: 0.32
+  autoLoop: 0
+  autoInterval: 0.55
+  kickKey: 32
+  toggleAutoKey: 116
+  reverseDirectionKey: 114
+  ampUpKey: 61
+  ampDownKey: 45
+  durUpKey: 93
+  durDownKey: 91
+  widthUpKey: 46
+  widthDownKey: 44
+  waveLenUpKey: 39
+  waveLenDownKey: 59
+  halfLifeUpKey: 50
+  halfLifeDownKey: 49
+  ampStepDeg: 2
+  durStep: 0.03
+  widthStepJoints: 0.2
+  waveLenStepJoints: 0.5
+  halfLifeStep: 0.01
 --- !u!4 &30871592 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 5654194947902579773, guid: 8bfd809688f9e9e4990408c0c1f10aba,
@@ -1343,8 +1364,8 @@ GameObject:
   - component: {fileID: 1091441942}
   - component: {fileID: 1091441943}
   - component: {fileID: 1091441944}
-  - component: {fileID: 1091441946}
   - component: {fileID: 1091441945}
+  - component: {fileID: 1091441947}
   m_Layer: 0
   m_Name: CatBody
   m_TagString: Untagged
@@ -1403,7 +1424,7 @@ MonoBehaviour:
   providers:
   - {fileID: 1091441942}
   - {fileID: 1091441943}
-  - {fileID: 1091441946}
+  - {fileID: 1091441947}
   flexibility: 0.6
   dampingHalfLife: 0.12
   rollFlexibility: 0.8
@@ -1503,8 +1524,37 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   movementController: {fileID: 2025579680}
-  harmonicProvider: {fileID: 1091441946}
---- !u!114 &1091441946
+  kickWaveProvider: {fileID: 1091441947}
+  kickWaveDurationSource: 1
+  kickWaveDurationScale: 1
+  kickWaveDurationOffset: 0
+  kickWaveDurationClamp: {x: 0.05, y: 1.2}
+  useKickWaveDurationRemapCurve: 0
+  kickWaveDurationRemap:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 0
+      inSlope: 0
+      outSlope: 1
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 1
+      inSlope: 1
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+--- !u!114 &1091441947
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -1513,14 +1563,47 @@ MonoBehaviour:
   m_GameObject: {fileID: 1091441932}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 75c81f9674cff484ea972dfe1dad2a8e, type: 3}
+  m_Script: {fileID: 11500000, guid: fe89905b4f3b5c84aa2739729838b26c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   globalWeight: 1
-  maxAmplitude: 60
-  frequency: 0.5
-  decayRate: 100
-  waveOffset: 1.2
+  totalJoints: 4
+  maxAmplitudeDeg: 45
+  packetWidthJoints: 2
+  wavelengthJoints: 2
+  useCarrier: 0
+  travelDirection: -1
+  duration: 0.2
+  tailPaddingJoints: 2
+  amplitudeByIndex:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 1
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 1
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  halfLife: 0.06
+  dampingMul: 1
+  amplitudeBoost: 3.5
+  weightBoost: 2
+  baseWeight: 1
 --- !u!1 &1130919479
 GameObject:
   m_ObjectHideFlags: 0
