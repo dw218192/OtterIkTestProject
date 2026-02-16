@@ -143,11 +143,17 @@ public class IKStrokeController : MonoBehaviour
         public Vector3 interruptReturnStart;
         public Vector3 interruptReturnControl;
         public Vector3 interruptReturnEnd;
+        public bool hasInterruptReturnLocal;
+        public Vector3 interruptReturnStartLocal;
+        public Vector3 interruptReturnControlLocal;
+        public Vector3 interruptReturnEndLocal;
         public float interruptReturnApproxLength;
         public bool eventBArmed;
         public float eventBCooldownTimer;
         public Vector3 currentTargetWorld;
         public bool hasCurrentTarget;
+        public Vector3 currentTargetLocalStable;
+        public bool hasCurrentTargetLocalStable;
     }
 
     private SideState leftState;
@@ -184,6 +190,8 @@ public class IKStrokeController : MonoBehaviour
         rightState.currentTargetWorld = rRest;
         leftState.hasCurrentTarget = true;
         rightState.hasCurrentTarget = true;
+        SyncStateLocalFromWorld(ref leftState, lRest);
+        SyncStateLocalFromWorld(ref rightState, rRest);
         leftState.eventBArmed = true;
         rightState.eventBArmed = true;
         leftState.eventBCooldownTimer = Mathf.Max(0f, minLoopIntervalSec);
@@ -330,6 +338,7 @@ public class IKStrokeController : MonoBehaviour
                 state.lastAccumulatedPhaseDeg = 0f;
                 state.isInterruptReturning = false;
                 state.interruptReturnT = 0f;
+                state.hasInterruptReturnLocal = false;
                 if (isLeft) leftAccumulatedPhaseDeg = 0f;
                 else rightAccumulatedPhaseDeg = 0f;
                 OnEventBLoopCompleted?.Invoke(isLeft);
@@ -378,21 +387,42 @@ public class IKStrokeController : MonoBehaviour
         state.lastAccumulatedPhaseDeg = 0f;
         state.isInterruptReturning = false;
         state.interruptReturnT = 0f;
+        state.hasInterruptReturnLocal = false;
         // Do not force-arm here; keep hysteresis state from previous loop.
         if (logEvents) Debug.Log($"[IKStrokeController] Stroke start ({(isLeft ? "L" : "R")})", this);
     }
 
     private void MoveTargetTowards(ref SideState state, Transform target, Vector3 desiredWorld, float sharpness, float dt)
     {
-        if (!state.hasCurrentTarget)
+        if (TryGetStableFrame(out Vector3 stableCenter, out Quaternion stableBasis))
         {
-            state.currentTargetWorld = desiredWorld;
+            Vector3 desiredLocal = Quaternion.Inverse(stableBasis) * (desiredWorld - stableCenter);
+            if (!state.hasCurrentTargetLocalStable)
+            {
+                state.currentTargetLocalStable = desiredLocal;
+                state.hasCurrentTargetLocalStable = true;
+            }
+            else
+            {
+                float aLocal = ExpAlpha(sharpness, dt);
+                state.currentTargetLocalStable = Vector3.Lerp(state.currentTargetLocalStable, desiredLocal, aLocal);
+            }
+
+            state.currentTargetWorld = stableCenter + stableBasis * state.currentTargetLocalStable;
             state.hasCurrentTarget = true;
         }
         else
         {
-            float a = ExpAlpha(sharpness, dt);
-            state.currentTargetWorld = Vector3.Lerp(state.currentTargetWorld, desiredWorld, a);
+            if (!state.hasCurrentTarget)
+            {
+                state.currentTargetWorld = desiredWorld;
+                state.hasCurrentTarget = true;
+            }
+            else
+            {
+                float a = ExpAlpha(sharpness, dt);
+                state.currentTargetWorld = Vector3.Lerp(state.currentTargetWorld, desiredWorld, a);
+            }
         }
 
         if (target) target.position = state.currentTargetWorld;
@@ -429,6 +459,29 @@ public class IKStrokeController : MonoBehaviour
         }
 
         return transform.position;
+    }
+
+    private bool TryGetStableFrame(out Vector3 center, out Quaternion basis)
+    {
+        center = Vector3.zero;
+        basis = Quaternion.identity;
+        if (!dynamicSource) return false;
+
+        center = dynamicSource.StableCenter;
+        basis = dynamicSource.StableBasis;
+        return basis != Quaternion.identity;
+    }
+
+    private void SyncStateLocalFromWorld(ref SideState state, Vector3 worldPos)
+    {
+        if (!TryGetStableFrame(out Vector3 center, out Quaternion basis))
+        {
+            state.hasCurrentTargetLocalStable = false;
+            return;
+        }
+
+        state.currentTargetLocalStable = Quaternion.Inverse(basis) * (worldPos - center);
+        state.hasCurrentTargetLocalStable = true;
     }
 
     private bool TryGetSignedAngleDeg(bool isLeft, out float signedAngleDeg)
@@ -603,6 +656,22 @@ public class IKStrokeController : MonoBehaviour
                 0.5f * (state.interruptReturnStart + state.interruptReturnEnd) +
                 up * interruptReturnUpOffset +
                 forward * interruptReturnForwardOffset;
+
+            // Store bezier points in StableBasis local space so high-speed body translation
+            // won't drag the return path backward in world space.
+            if (TryGetStableFrame(out Vector3 stableCenter, out Quaternion stableBasis))
+            {
+                Quaternion inv = Quaternion.Inverse(stableBasis);
+                state.interruptReturnStartLocal = inv * (state.interruptReturnStart - stableCenter);
+                state.interruptReturnControlLocal = inv * (state.interruptReturnControl - stableCenter);
+                state.interruptReturnEndLocal = inv * (state.interruptReturnEnd - stableCenter);
+                state.hasInterruptReturnLocal = true;
+            }
+            else
+            {
+                state.hasInterruptReturnLocal = false;
+            }
+
             state.interruptReturnApproxLength = EstimateQuadraticBezierLength(
                 state.interruptReturnStart,
                 state.interruptReturnControl,
@@ -621,6 +690,7 @@ public class IKStrokeController : MonoBehaviour
         {
             state.isInterruptReturning = false;
             state.interruptReturnT = 0f;
+            state.hasInterruptReturnLocal = false;
         }
 
         OnEventAInterrupted?.Invoke(isLeft);
@@ -636,15 +706,29 @@ public class IKStrokeController : MonoBehaviour
             state.interruptReturnT = Mathf.Clamp01(state.interruptReturnT + (speed * dt) / length);
             float t = state.interruptReturnT;
             float te = t * t * (3f - 2f * t);
-            Vector3 a = Vector3.Lerp(state.interruptReturnStart, state.interruptReturnControl, te);
-            Vector3 b = Vector3.Lerp(state.interruptReturnControl, state.interruptReturnEnd, te);
-            state.currentTargetWorld = Vector3.Lerp(a, b, te);
+
+            if (state.hasInterruptReturnLocal && TryGetStableFrame(out Vector3 stableCenter, out Quaternion stableBasis))
+            {
+                Vector3 aL = Vector3.Lerp(state.interruptReturnStartLocal, state.interruptReturnControlLocal, te);
+                Vector3 bL = Vector3.Lerp(state.interruptReturnControlLocal, state.interruptReturnEndLocal, te);
+                Vector3 pL = Vector3.Lerp(aL, bL, te);
+                state.currentTargetWorld = stableCenter + stableBasis * pL;
+            }
+            else
+            {
+                Vector3 a = Vector3.Lerp(state.interruptReturnStart, state.interruptReturnControl, te);
+                Vector3 b = Vector3.Lerp(state.interruptReturnControl, state.interruptReturnEnd, te);
+                state.currentTargetWorld = Vector3.Lerp(a, b, te);
+            }
+
             if (ikTarget) ikTarget.position = state.currentTargetWorld;
             if (state.interruptReturnT >= 0.999f)
             {
                 state.isInterruptReturning = false;
+                state.hasInterruptReturnLocal = false;
                 state.currentTargetWorld = restWorld;
                 if (ikTarget) ikTarget.position = restWorld;
+                SyncStateLocalFromWorld(ref state, restWorld);
             }
             return;
         }
@@ -664,6 +748,7 @@ public class IKStrokeController : MonoBehaviour
             {
                 state.currentTargetWorld = restWorld;
                 if (ikTarget) ikTarget.position = restWorld;
+                SyncStateLocalFromWorld(ref state, restWorld);
             }
         }
     }

@@ -101,16 +101,20 @@ namespace OtterIK.Neo.Experiment
                 // 应用混合结果
                 rollTargets[i] = dominantRoll;
 
-                if (aimActive && ypWeightSum > 1e-6f)
+              // --- 修改后的代码 ---
+                if (ypWeightSum > 1e-6f)
                 {
                     float totalW = Mathf.Clamp01(ypWeightSum);
-                    // Multiply by aimBlend so intent releases smoothly instead of snapping back to identity.
-                    Vector3 meanVec = (ypRotVecSum / ypWeightSum) * totalW * aimBlend;
+                    
+                    // 我们只让 AimProvider 产生的部分受到 aimBlend (拖拽状态) 的影响
+                    // 而像简谐运动这种叠加效果，应该在 ypRotVecSum 中被直接应用
+                    Vector3 meanVec = (ypRotVecSum / ypWeightSum) * totalW;
+                    
                     yawPitchTargets[i] = Quaternion.AngleAxis(meanVec.magnitude * Mathf.Rad2Deg, meanVec.normalized);
                 }
                 else
                 {
-                    yawPitchTargets[i] = Quaternion.identity; // 自动回正
+                    yawPitchTargets[i] = Quaternion.identity;
                 }
             }
 
