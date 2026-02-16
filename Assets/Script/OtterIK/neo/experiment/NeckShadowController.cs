@@ -21,6 +21,14 @@ namespace OtterIK.Neo.Experiment
         public float backstrokePitchBias = 35f;
         public float followSpeed = 20f;
 
+        [Header("Rotation Limits (Neck vs Chest)")]
+        [Tooltip("Limit neck shadow rotation relative to the chest shadow to avoid dislocation.")]
+        public bool enableRotationLimits = true;
+        [Tooltip("Max absolute angles (degrees) for X/Pitch, Y/Yaw, Z/Roll relative to chest.")]
+        public Vector3 maxRelativeEulerAngles = new Vector3(35f, 60f, 25f);
+        [Tooltip("If true, each joint's limit scales by its weight along the chain (base smaller, tip larger).")]
+        public bool scaleLimitByChainWeight = true;
+
         private Dictionary<Transform, Transform> _originalParents = new Dictionary<Transform, Transform>();
         private Vector3[] _initialLocalOffsets; // 【关键】存储原始骨骼长度和偏移
 
@@ -61,6 +69,7 @@ namespace OtterIK.Neo.Experiment
             if (neckShadowNodes.Count == 0 || decoupler == null || aimTarget == null) return;
 
             // 1. 获取影子胸腔底座
+            if (decoupler.shadowNodes == null || chestShadowIndex < 0 || chestShadowIndex >= decoupler.shadowNodes.Count) return;
             Transform chestShadow = decoupler.shadowNodes[chestShadowIndex];
             bool isBack = flipProvider != null && flipProvider.isBackstroke;
 
@@ -93,7 +102,14 @@ namespace OtterIK.Neo.Experiment
 
                 // 计算目标旋转（基于胸腔旋转作为父级参考）
                 // 这里的 * Quaternion.identity 是因为影子节点没有 bindPose 偏移
-                Quaternion targetRot = chestShadow.rotation * poseBias * ikRot;
+                Quaternion relativeRot = poseBias * ikRot; // chest-local relative rotation
+                if (enableRotationLimits)
+                {
+                    Vector3 limit = maxRelativeEulerAngles;
+                    if (scaleLimitByChainWeight) limit *= weight;
+                    relativeRot = ClampRelativeRotationEuler(relativeRot, limit);
+                }
+                Quaternion targetRot = chestShadow.rotation * relativeRot;
 
                 // 平滑插值应用
                 neckShadowNodes[i].rotation = Quaternion.Slerp(neckShadowNodes[i].rotation, targetRot, Time.deltaTime * followSpeed);
@@ -106,6 +122,31 @@ namespace OtterIK.Neo.Experiment
                 if (joint != null && _originalParents.ContainsKey(joint))
                     joint.SetParent(_originalParents[joint], true);
             }
+        }
+
+        private static Quaternion ClampRelativeRotationEuler(Quaternion relativeRot, Vector3 maxAbsEulerAngles)
+        {
+            // Convert to signed Euler, clamp per-axis, then rebuild.
+            Vector3 e = relativeRot.eulerAngles;
+            e.x = NormalizeSignedAngle(e.x);
+            e.y = NormalizeSignedAngle(e.y);
+            e.z = NormalizeSignedAngle(e.z);
+
+            maxAbsEulerAngles.x = Mathf.Max(0f, maxAbsEulerAngles.x);
+            maxAbsEulerAngles.y = Mathf.Max(0f, maxAbsEulerAngles.y);
+            maxAbsEulerAngles.z = Mathf.Max(0f, maxAbsEulerAngles.z);
+
+            e.x = Mathf.Clamp(e.x, -maxAbsEulerAngles.x, maxAbsEulerAngles.x);
+            e.y = Mathf.Clamp(e.y, -maxAbsEulerAngles.y, maxAbsEulerAngles.y);
+            e.z = Mathf.Clamp(e.z, -maxAbsEulerAngles.z, maxAbsEulerAngles.z);
+
+            return Quaternion.Euler(e);
+        }
+
+        private static float NormalizeSignedAngle(float degrees)
+        {
+            // Map [0..360) to (-180..180]
+            return Mathf.Repeat(degrees + 180f, 360f) - 180f;
         }
     }
 }

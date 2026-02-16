@@ -1511,6 +1511,9 @@ MonoBehaviour:
   flipProvider: {fileID: 1091441943}
   backstrokePitchBias: 35
   followSpeed: 10
+  enableRotationLimits: 1
+  maxRelativeEulerAngles: {x: 35, y: 60, z: 25}
+  scaleLimitByChainWeight: 1
 --- !u!114 &1091441945
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2506,20 +2509,20 @@ MonoBehaviour:
   useFixedPlaneY: 1
   fixedPlaneY: 0
   swimAvgSpeed: 2.5
-  sprintTargetSpeed: 3
+  sprintTargetSpeed: 3.5
   kickToPrepareRatioR: 0.35
   swimKMin: 0.3
   swimKMax: 0.5
   swimIMin: 0.5
   swimIMax: 0.8
-  sprintKMin: 0.15
-  sprintKMax: 0.3
-  sprintIMin: 0.06
-  sprintIMax: 0.18
+  sprintKMin: 0.2
+  sprintKMax: 0.4
+  sprintIMin: 0.3
+  sprintIMax: 0.5
   swimImpulseMin: 0.12
   swimImpulseMax: 1.1
-  sprintImpulseMin: 0.25
-  sprintImpulseMax: 2.2
+  sprintImpulseMin: 2.5
+  sprintImpulseMax: 3
   impulseGamma: 1.8
   demandDvRef: 1
   maxTurnRateDegPerSec: 180
@@ -2581,7 +2584,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   rb: {fileID: 2025579678}
-  linear: 1
+  linear: 0.4
   quadratic: 0.4
   angularLinear: 1.5
   angularQuadratic: 0
