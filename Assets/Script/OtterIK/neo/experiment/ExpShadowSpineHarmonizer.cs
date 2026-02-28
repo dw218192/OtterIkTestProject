@@ -52,7 +52,7 @@ namespace OtterIK.Neo.Experiment
             Quaternion[] yawPitchTargets = new Quaternion[n];
             float[] rollTargets = new float[n];
             
-            var mover = decoupler.GetComponentInParent<MovementControllerRB>();
+            var mover = decoupler.GetComponentInParent<CrestMovementControllerRB>();
             float aimBlend = mover != null ? mover.GetAimBlend01() : 0f; // dragging=1, release-align decays to 0
             bool aimActive = aimBlend > 1e-4f;
 

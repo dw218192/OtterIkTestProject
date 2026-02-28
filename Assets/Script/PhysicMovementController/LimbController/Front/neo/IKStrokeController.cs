@@ -23,7 +23,7 @@ public class IKStrokeController : MonoBehaviour
     [Header("Input")]
     public DynamicIndirectIk_V2 dynamicSource;
     public IKStrokeTrajectory_V2 trajectorySource;
-    public MovementControllerRB movementSource;
+    public CrestMovementControllerRB movementSource;
 
     [Header("IK Target Transforms (real IK points)")]
     public Transform leftLimbIkTarget;
@@ -168,7 +168,7 @@ public class IKStrokeController : MonoBehaviour
     {
         if (!dynamicSource) dynamicSource = GetComponent<DynamicIndirectIk_V2>();
         if (!trajectorySource) trajectorySource = GetComponent<IKStrokeTrajectory_V2>();
-        if (!movementSource) movementSource = GetComponent<MovementControllerRB>();
+        if (!movementSource) movementSource = GetComponent<CrestMovementControllerRB>();
     }
 
     private void Start()

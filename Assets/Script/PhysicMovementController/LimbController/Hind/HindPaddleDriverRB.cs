@@ -2,7 +2,7 @@ using UnityEngine;
 
 /// <summary>
 /// Runtime driver:
-/// - Subscribes MovementControllerRB.OnKickCycleStart (movement kicks, highest priority) :contentReference[oaicite:4]{index=4}
+/// - Subscribes CrestMovementControllerRB.OnKickCycleStart (movement kicks, highest priority) :contentReference[oaicite:4]{index=4}
 /// - Merges IdleHipTurnKickControllerRB logic (idle turn kick emitter, per-leg schedule/cooldown/strength) :contentReference[oaicite:5]{index=5}
 /// - Owns timing/playback and writes IK target positions using HindPaddleTrajectoryRB.EvaluateKickLocal()
 ///
@@ -32,7 +32,7 @@ public class HindPaddleDriverRB : MonoBehaviour
     }
 
     [Header("References")]
-    public MovementControllerRB movement;
+    public CrestMovementControllerRB movement;
     public HindPaddleTrajectoryRB trajectory;
 
     [Header("Space")]
@@ -76,7 +76,7 @@ public class HindPaddleDriverRB : MonoBehaviour
     [Header("Activation gates (avoid conflicts with movement kicks)")]
     [SerializeField] private bool requireDragging = true;
 
-    [Tooltip("Idle kicks only when MovementControllerRB targetSpeed <= eps (Aim rotate-only).")]
+    [Tooltip("Idle kicks only when CrestMovementControllerRB targetSpeed <= eps (Aim rotate-only).")]
     [SerializeField] private float aimTargetSpeedEps = 0.01f;
 
     [Tooltip("Idle kicks only when rigidbody planar speed is below this.")]
@@ -175,7 +175,7 @@ public class HindPaddleDriverRB : MonoBehaviour
     private void Reset()
     {
         rootSpace = transform;
-        movement = GetComponentInParent<MovementControllerRB>();
+        movement = GetComponentInParent<CrestMovementControllerRB>();
         trajectory = GetComponent<HindPaddleTrajectoryRB>();
     }
 
@@ -350,7 +350,7 @@ public class HindPaddleDriverRB : MonoBehaviour
 
     // ---------------- Movement kick event ----------------
 
-    private void HandleMovementKickCycleStart(MovementControllerRB.KickCycleEvent e)
+    private void HandleMovementKickCycleStart(CrestMovementControllerRB.KickCycleEvent e)
     {
         _moveKickActive = true;
         _moveKickT = 0f;

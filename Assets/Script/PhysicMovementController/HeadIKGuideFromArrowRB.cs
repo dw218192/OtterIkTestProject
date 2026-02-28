@@ -3,14 +3,14 @@ using UnityEngine;
 
 /// <summary>
 /// Updates a Head IK guide transform.
-/// - MovementControllerRB computes an input-intent "carrotWorld" ahead of the character.
+/// - CrestMovementControllerRB computes an input-intent "carrotWorld" ahead of the character.
 /// - This script positions the HeadIKGuide at/near that carrot, with optional extra lead.
 /// - When idle (no drag), it keeps a stable forward guide so neck/head can rest naturally.
 /// </summary>
 public class HeadIKGuideFromArrowRB : MonoBehaviour
 {
     [Header("References")]
-    [SerializeField] private MovementControllerRB movement;
+    [SerializeField] private CrestMovementControllerRB movement;
 
     [Tooltip("Optional state controller. If assigned, can disable head guide in certain states.")]
     [SerializeField] private MoveStateController moveState;
@@ -182,7 +182,7 @@ public class HeadIKGuideFromArrowRB : MonoBehaviour
     private void EnsureRefs()
     {
         if (movement == null)
-            movement = FindObjectOfType<MovementControllerRB>();
+            movement = FindObjectOfType<CrestMovementControllerRB>();
         if (movement != null && anchor == null)
             anchor = movement.transform;
 

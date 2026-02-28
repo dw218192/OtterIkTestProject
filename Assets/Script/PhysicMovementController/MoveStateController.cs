@@ -20,7 +20,7 @@ public class MoveStateController : MonoBehaviour
     public enum MoveState { ProneSwim, BackFloatSwim, Sprint, IdleUpright, Special }
 
     [Header("References")]
-    [SerializeField] private MovementControllerRB movement;
+    [SerializeField] private CrestMovementControllerRB movement;
     [SerializeField] private Rigidbody rb;
 
     [Header("Effort (for Prone <-> BackFloat)")]
@@ -80,13 +80,13 @@ public class MoveStateController : MonoBehaviour
 
     private void Reset()
     {
-        movement = GetComponent<MovementControllerRB>();
+        movement = GetComponent<CrestMovementControllerRB>();
         rb = GetComponent<Rigidbody>();
     }
 
     private void Awake()
     {
-        if (movement == null) movement = GetComponent<MovementControllerRB>();
+        if (movement == null) movement = GetComponent<CrestMovementControllerRB>();
         if (rb == null) rb = GetComponent<Rigidbody>();
 
         ApplyPolicyForState(current);
@@ -158,7 +158,7 @@ public class MoveStateController : MonoBehaviour
         float dt = Time.fixedDeltaTime;
         float speed = movement.GetSpeed();
 
-        bool sprintIntentOk = !requireSprintIntentZone || (movement.GetZone() == MovementControllerRB.MoveZone.Sprint && movement.IsDragging());
+        bool sprintIntentOk = !requireSprintIntentZone || (movement.GetZone() == CrestMovementControllerRB.MoveZone.Sprint && movement.IsDragging());
 
         if (current == MoveState.Sprint)
         {

@@ -4,7 +4,7 @@ using UnityEngine;
 /// Optimized top-down orthographic follow camera (RB-friendly).
 ///
 /// Design goals (your latest requirements):
-/// 1) Minimal tuning: follow response auto-derived from MovementControllerRB speeds.
+/// 1) Minimal tuning: follow response auto-derived from CrestMovementControllerRB speeds.
 /// 2) Composition guarantee: keep the otter inside DualRingUI inner ring via SCREEN-SPACE pixel clamp.
 /// 3) Single "follow lock strength" knob:
 ///    - higher => tighter centering + snappier follow
@@ -18,7 +18,7 @@ public class TopDownCameraControllerRb : MonoBehaviour
     [Header("Target")]
     [SerializeField] private Transform target;
     [SerializeField] private Rigidbody targetRb; // optional
-    [SerializeField] private MovementControllerRB movement; // speeds / velocity helpers
+    [SerializeField] private CrestMovementControllerRB movement; // speeds / velocity helpers
     [SerializeField] private MoveStateController stateController; // sprint state
 
     [Header("DualRingUI (for screen-space constraint)")]
@@ -90,7 +90,7 @@ public class TopDownCameraControllerRb : MonoBehaviour
             targetRb = target.GetComponent<Rigidbody>();
 
         if (target != null && movement == null)
-            movement = target.GetComponent<MovementControllerRB>();
+            movement = target.GetComponent<CrestMovementControllerRB>();
 
         if (target != null && stateController == null)
             stateController = target.GetComponent<MoveStateController>();
