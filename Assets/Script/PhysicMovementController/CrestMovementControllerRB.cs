@@ -1,5 +1,6 @@
 using Crest;
 using UnityEngine;
+using Range = UnityEngine.RangeAttribute;
 
 /// <summary>
 /// Rigidbody-driven swimming controller with Crest ocean integration (mouse + dual-ring UI).
@@ -54,9 +55,10 @@ public class CrestMovementControllerRB : MonoBehaviour
     [SerializeField, Range(0f, 2f)] private float _waterCheckTolerance = 0.1f;
 
     [Header("Buoyancy")]
-    [SerializeField] private float _buoyancyCoeff = 3f;
+    [SerializeField, Tooltip("How deep (m) the object sits at rest. Smaller = floats higher.")]
+    private float _equilibriumSubmersion = 0.25f;
     [SerializeField] private float _maximumBuoyancyForce = Mathf.Infinity;
-    [SerializeField] private float _dragInWaterUp = 3f;
+    [SerializeField] private float _dragInWaterUp = 9f;
     [SerializeField] private float _buoyancyTorque = 8f;
     [SerializeField] private float _dragInWaterRotational = 0.2f;
     [SerializeField, Range(0f, 60f)] private float _maxRollPitchDeg = 20f;
@@ -288,8 +290,11 @@ public class CrestMovementControllerRB : MonoBehaviour
 
     private void ApplyBuoyancyForce()
     {
-        // Buoyancy: cubic submersion
-        Vector3 buoyancy = _buoyancyCoeff * _submersionHeight * _submersionHeight * _submersionHeight * -Physics.gravity.normalized;
+        // Buoyancy: cubic submersion.  coeff derived so that at _equilibriumSubmersion the
+        // upward acceleration exactly equals gravity magnitude → object rests at that depth.
+        float h0 = Mathf.Max(0.01f, _equilibriumSubmersion);
+        float coeff = Physics.gravity.magnitude / (h0 * h0 * h0);
+        Vector3 buoyancy = coeff * _submersionHeight * _submersionHeight * _submersionHeight * -Physics.gravity.normalized;
         if (_maximumBuoyancyForce < Mathf.Infinity)
         {
             buoyancy = Vector3.ClampMagnitude(buoyancy, _maximumBuoyancyForce);
