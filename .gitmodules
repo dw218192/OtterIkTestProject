@@ -1,0 +1,4 @@
+[submodule "tools/framework"]
+	path = tools/framework
+	url = https://github.com/dw218192/repokit.git
+	branch = release

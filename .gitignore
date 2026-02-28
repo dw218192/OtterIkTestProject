@@ -23,3 +23,15 @@ Thumbs.db
 
 # Crash reports
 sysinfo.txt
+
+# Build output
+[Bb]uilds/
+
+# repokit
+_tools/
+tools/pyproject.toml
+tools/uv.lock
+repo
+repo.cmd
+_agent/
+config.local.yaml

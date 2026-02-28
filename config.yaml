@@ -1,0 +1,23 @@
+repo:
+  features: []
+  tokens:
+    unity_editor:
+      env: UNITY_EDITOR
+      path: true
+    build_root: Builds
+    webgl_build_dir: "{build_root}/WebGL"
+  extra_deps:
+    - "ghp-import>=2.1"
+
+build:
+  steps:
+    - command: >-
+        "{unity_editor}" -quit -batchmode
+        -projectPath "{workspace_root}"
+        -buildTarget WebGL
+        -executeMethod WebGLBuilder.Build
+        -logFile -
+
+publish:
+  steps:
+    - "{repo} python -m ghp_import -n -p -f {webgl_build_dir}"
