@@ -6,8 +6,6 @@ repo:
       path: true
     build_root: Builds
     webgl_build_dir: "{build_root}/WebGL"
-  extra_deps:
-    - "ghp-import>=2.1"
 
 build:
   steps:
@@ -17,7 +15,3 @@ build:
         -buildTarget WebGL
         -executeMethod WebGLBuilder.Build
         -logFile -
-
-publish:
-  steps:
-    - "{repo} python -m ghp_import -n -p -f {webgl_build_dir}"
