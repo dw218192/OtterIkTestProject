@@ -65,7 +65,7 @@ public class TopDownCameraControllerRb : MonoBehaviour
     {
         if (movement != null) return movement.GetSpeed();
         if (targetRb == null) return 0f;
-        Vector3 v = targetRb.velocity; v.y = 0f;
+        Vector3 v = targetRb.linearVelocity; v.y = 0f;
         return v.magnitude;
     }
 

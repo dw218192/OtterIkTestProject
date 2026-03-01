@@ -587,7 +587,7 @@ public class IKStrokeController : MonoBehaviour
         if (dynamicSource)
         {
             Rigidbody rb = dynamicSource.GetComponent<Rigidbody>();
-            if (rb) return rb.velocity.magnitude >= Mathf.Max(0f, movingSpeedThreshold);
+            if (rb) return rb.linearVelocity.magnitude >= Mathf.Max(0f, movingSpeedThreshold);
         }
         return false;
     }

@@ -217,7 +217,7 @@ public class MoveStateController : MonoBehaviour
     private bool CanEnterUpright()
     {
         float speed = movement != null ? movement.GetSpeed()
-            : (rb != null ? new Vector3(rb.velocity.x, 0f, rb.velocity.z).magnitude : 999f);
+            : (rb != null ? new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z).magnitude : 999f);
         return speed <= uprightEnterSpeed;
     }
 

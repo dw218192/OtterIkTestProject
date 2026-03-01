@@ -316,7 +316,7 @@ public class CrestMovementControllerRB : MonoBehaviour
         rb.AddForce(buoyancy, ForceMode.Acceleration);
 
         // Vertical drag relative to water surface velocity
-        var velocityRelativeToWater = rb.velocity - _waterSurfaceVel;
+        var velocityRelativeToWater = rb.linearVelocity - _waterSurfaceVel;
         float verticalDrag = _dragInWaterUp * Vector3.Dot(Vector3.up, -velocityRelativeToWater);
         rb.AddForce(verticalDrag * Vector3.up, ForceMode.Acceleration);
 
@@ -339,7 +339,7 @@ public class CrestMovementControllerRB : MonoBehaviour
 
     private void ApplyHorizontalDrag()
     {
-        Vector3 velXZ = rb.velocity;
+        Vector3 velXZ = rb.linearVelocity;
         velXZ.y = 0f;
         float speed = velXZ.magnitude;
         if (speed < 1e-4f) return;
@@ -751,12 +751,12 @@ public class CrestMovementControllerRB : MonoBehaviour
         bool hasIntent = isDragging && targetSpeed > 1e-4f;
         if (hasIntent) return;
 
-        Vector3 v = rb.velocity; v.y = 0f;
+        Vector3 v = rb.linearVelocity; v.y = 0f;
         float spd = v.magnitude;
 
         if (spd < stopSpeedEpsilon)
         {
-            rb.velocity = new Vector3(0f, rb.velocity.y, 0f);
+            rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
             return;
         }
 
@@ -876,7 +876,7 @@ public class CrestMovementControllerRB : MonoBehaviour
     public Vector3 GetVelocity()
     {
         if (rb == null) return Vector3.zero;
-        Vector3 v = rb.velocity;
+        Vector3 v = rb.linearVelocity;
         v.y = 0f;
         return v;
     }
