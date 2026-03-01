@@ -27,4 +27,15 @@ Rigidbody swim controller integrated with Crest ocean sampling. Uses a time-doma
 - `HeadIKGuideFromArrowRB` — positions a head look-target from the movement controller's aim direction
 
 ## Dependencies
-- [Crest Ocean System](https://github.com/wave-harmonic/crest)
+- [Crest Ocean System](https://github.com/dw218192/crest) — WebGPU-patched fork, consumed via git submodule
+
+### Crest Setup
+To update after changes in the fork:
+
+```bash
+# In the fork repo
+./repo publish     # re-runs subtree split and pushes both branches
+
+# In this project
+git submodule update --remote Assets/Crest
+```
