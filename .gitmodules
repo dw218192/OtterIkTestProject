@@ -2,3 +2,7 @@
 	path = tools/framework
 	url = https://github.com/dw218192/repokit.git
 	branch = release
+[submodule "Assets/Crest"]
+	path = Assets/Crest
+	url = git@github.com:dw218192/crest.git
+	branch = package
