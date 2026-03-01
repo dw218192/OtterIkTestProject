@@ -135,7 +135,7 @@ Material:
     - _Foam: 1
     - _Foam3DLighting: 0
     - _FoamBubbleParallax: 0.093
-    - _FoamScale: 12.8
+    - _FoamScale: 17.9
     - _FresnelPower: 5
     - _Invert: 1
     - _LightIntensityMultiplier: 2
@@ -143,7 +143,7 @@ Material:
     - _Moving: 0.17
     - _NormalsScale: 117
     - _NormalsStrength: 1.499
-    - _NormalsStrengthOverall: 1
+    - _NormalsStrengthOverall: 0.811
     - _Offset: 0.00008
     - _OverrideReflectionCubemap: 0
     - _PlanarReflectionDistanceFactor: 0

@@ -10,7 +10,6 @@ GameObject:
   m_Component:
   - component: {fileID: 6579457953099658299}
   - component: {fileID: 2349011403067869683}
-  - component: {fileID: 4692809829427642334}
   m_Layer: 0
   m_Name: TimeProvider
   m_TagString: Untagged
@@ -47,23 +46,10 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   _version: 0
   _paused: 0
-  _overrideTime: 1
+  _overrideTime: 0
   _time: 0
   _overrideDeltaTime: 0
   _deltaTime: 0.1
---- !u!114 &4692809829427642334
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1042154114099457915}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: b2d79af73b1cd4a4ca5b5d04e83d2fff, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  TimeScale: 0.3
 --- !u!1 &1267130884610260851
 GameObject:
   m_ObjectHideFlags: 0
@@ -108,13 +94,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 7a57126133720c243a7af00a156c9ee8, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  _spectrum: {fileID: 11400000, guid: f565841342dd5fd4d90222bb810721e9, type: 2}
+  _spectrum: {fileID: 11400000, guid: 41214122901b0344faf760c4e592d7db, type: 2}
   _spectrumFixedAtRuntime: 1
   _waveDirectionHeadingAngle: 0
   _overrideGlobalWindSpeed: 0
   _windSpeed: 20
   _respectShallowWaterAttenuation: 1
-  _weight: 1
+  _weight: 0.5
   _blendMode: 0
   _queue: 0
   _resolution: 128
@@ -202,27 +188,31 @@ MonoBehaviour:
   _minScale: 8
   _maxScale: 256
   _dropDetailHeightBasedOnWaves: 0.2
-  _lodDataResolution: 384
+  _lodDataResolution: 496
   _geometryDownSampleFactor: 2
   _lodCount: 7
-  _extentsSizeMultiplier: 100
+  _extentsSizeMultiplier: 10
   _renderingLayerMask: 255
-  _simSettingsAnimatedWaves: {fileID: 11400000, guid: f86d1f9b0487a6149a3d5066936ad454, type: 2}
+  _simSettingsAnimatedWaves: {fileID: 11400000, guid: b3c4ae249fbf287439e92dfd7fc43477,
+    type: 2}
   _createSeaFloorDepthData: 1
-  _simSettingsSeaFloorDepth: {fileID: 11400000, guid: 70c5f23d9c3de10439778f9daafa5107, type: 2}
+  _simSettingsSeaFloorDepth: {fileID: 11400000, guid: ecf16984e4bd1484f9116957fd512d1d,
+    type: 2}
   _createFoamSim: 1
-  _simSettingsFoam: {fileID: 11400000, guid: 07aa4ae51a3069e4e82946be5659a769, type: 2}
+  _simSettingsFoam: {fileID: 11400000, guid: 24ac699666d24974bbbb8e37f4ee6686, type: 2}
   _createDynamicWaveSim: 1
-  _simSettingsDynamicWaves: {fileID: 0}
+  _simSettingsDynamicWaves: {fileID: 11400000, guid: 97e3444938d56d74281f3def0b318f1c,
+    type: 2}
   _createFlowSim: 1
-  _simSettingsFlow: {fileID: 11400000, guid: 8f56bc353efdec14fbae1efefdf374c6, type: 2}
-  _createShadowData: 0
-  _simSettingsShadow: {fileID: 11400000, guid: f30b86b51ac6b0c418e4b3cdf46d8d41, type: 2}
+  _simSettingsFlow: {fileID: 11400000, guid: 1da4bd08c3502f441b150d5889b4078c, type: 2}
+  _createShadowData: 1
+  _simSettingsShadow: {fileID: 11400000, guid: 0ca3e132a65455345a5586b4f14590e7, type: 2}
   _createClipSurfaceData: 1
-  _simSettingsClipSurface: {fileID: 11400000, guid: db95529da4c495243b6de0abeec4b950, type: 2}
+  _simSettingsClipSurface: {fileID: 11400000, guid: f22b0c58e2f1afa4ba66297103b418a1,
+    type: 2}
   _defaultClippingState: 0
   _createAlbedoData: 1
-  _settingsAlbedo: {fileID: 11400000, guid: 0d30478c5faa07242b17b803f0783742, type: 2}
+  _settingsAlbedo: {fileID: 11400000, guid: 563a26541a1b5e0498b1da7f7fab8670, type: 2}
   _surfaceSelfIntersectionFixMode: 2
   _underwaterCullLimit: 0.00072
   _verifyOpaqueAndDepthTexturesEnabled: 1
@@ -330,7 +320,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _version: 0
-  _type: 1
+  _type: 0
   _refreshMode: 0
   _layers:
     serializedVersion: 2
@@ -343,7 +333,7 @@ MonoBehaviour:
   _maximumLodLevelOverride: 0
   _forceAlwaysUpdateDebug: 0
   _hideDepthCacheCam: 1
-  _savedCache: {fileID: 2800000, guid: 77cf4b0353b65af40bd3824848608599, type: 3}
+  _savedCache: {fileID: 2800000, guid: 844df4aaac4bd7b4fa7d56c845ec9c28, type: 3}
   _runValidationOnStart: 1
   _relative: 1
 --- !u!1 &8852363968528390550
@@ -371,7 +361,7 @@ Transform:
   m_GameObject: {fileID: 8852363968528390550}
   serializedVersion: 2
   m_LocalRotation: {x: 0.19192955, y: 0.59067863, z: -0.1472727, w: 0.76978743}
-  m_LocalPosition: {x: -67.02, y: 15.42, z: 28.47}
+  m_LocalPosition: {x: -8.08, y: 4.45, z: -2.17}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
