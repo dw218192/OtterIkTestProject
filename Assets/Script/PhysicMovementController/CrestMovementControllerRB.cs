@@ -37,7 +37,6 @@ public class CrestMovementControllerRB : MonoBehaviour
     public enum WaterState { NotInWater, Floating, Diving }
 
     [Header("References")]
-    [SerializeField] private DualRingGuide ui;
     [SerializeField] private Rigidbody rb;
 
     [Header("Propulsion alignment gate (optional)")]
@@ -138,8 +137,14 @@ public class CrestMovementControllerRB : MonoBehaviour
     [SerializeField] private float carrotRadiusAim = 1.2f;
     [SerializeField] private float carrotRadiusSwim = 2.0f;
     [SerializeField] private float carrotRadiusSprint = 2.8f;
+    [SerializeField] private Transform headIKGuide;
+    [SerializeField] private float headIKFollowSpeed = 22f;
 
-    [Header("Input smoothing")]
+    [Header("Input")]
+    [SerializeField] private Camera inputCamera;
+    [SerializeField] private float inputPlaneY = 0f;
+    [SerializeField] private float innerRadius = 1.2f;
+    [SerializeField] private float outerRadius = 2.0f;
     [SerializeField] private float inputSmoothing = 18f;
 
     [Header("Pre-kick visualization")]
@@ -164,6 +169,9 @@ public class CrestMovementControllerRB : MonoBehaviour
     private Vector3 inputDirWorld;   // smoothed XZ direction from player to mouse hit
     private float inputDistWorld;    // smoothed XZ distance from player to mouse hit
     private MoveZone zone = MoveZone.None;
+    private bool _arrowVisible;
+    private Vector3 _arrowDir;
+    private float _arrowDist;
 
     // Intent
     private Vector3 worldDir = Vector3.forward; // desired on XZ
@@ -240,6 +248,15 @@ public class CrestMovementControllerRB : MonoBehaviour
     {
         HandleInput();
         UpdateIntentAndCarrot();
+    }
+
+    private void LateUpdate()
+    {
+        if (headIKGuide == null) return;
+        Vector3 target = carrotWorld;
+        target.y = inputPlaneY;
+        float k = headIKFollowSpeed > 0f ? (1f - Mathf.Exp(-headIKFollowSpeed * Time.deltaTime)) : 1f;
+        headIKGuide.position = Vector3.Lerp(headIKGuide.position, target, k);
     }
 
     private void FixedUpdate()
@@ -349,7 +366,7 @@ public class CrestMovementControllerRB : MonoBehaviour
             targetSpeed = 0f;
             inputDistWorld = 0f;
 
-            ui?.HideArrow();
+            _arrowVisible = false;
 
             if (hadDrag) BeginReleaseAutoAlign();
         }
@@ -368,14 +385,13 @@ public class CrestMovementControllerRB : MonoBehaviour
             inputDirWorld = rawDir;
         inputDistWorld = Mathf.Lerp(inputDistWorld, rawDist, k);
 
-        float innerR = (ui != null) ? ui.InnerRadius : 1.2f;
-        float outerR = (ui != null) ? ui.OuterRadius : 2.0f;
-
-        if (inputDistWorld <= innerR) zone = MoveZone.Aim;
-        else if (inputDistWorld < outerR) zone = MoveZone.Swim;
+        if (inputDistWorld <= innerRadius) zone = MoveZone.Aim;
+        else if (inputDistWorld < outerRadius) zone = MoveZone.Swim;
         else zone = MoveZone.Sprint;
 
-        ui?.SetArrow(inputDirWorld, inputDistWorld);
+        _arrowVisible = true;
+        _arrowDir = inputDirWorld;
+        _arrowDist = Mathf.Min(inputDistWorld, outerRadius);
     }
 
     private void ComputeMouseWorld(out Vector3 dirXZ, out float dist)
@@ -383,46 +399,22 @@ public class CrestMovementControllerRB : MonoBehaviour
         dirXZ = Vector3.forward;
         dist = 0f;
 
-        Camera cam = Camera.main;
+        Camera cam = inputCamera != null ? inputCamera : Camera.main;
         if (cam == null) return;
 
-        // Screen-space delta: otter screen position → mouse screen position.
-        // This is independent of rb.position changes (kicks/buoyancy), avoiding
-        // the feedback loop that world-space delta would create.
+        Ray ray = cam.ScreenPointToRay(Input.mousePosition);
+        if (Mathf.Abs(ray.direction.y) < 1e-6f) return;
+
+        float t = (inputPlaneY - ray.origin.y) / ray.direction.y;
+        if (t < 0f) return;
+
+        Vector3 hitWorld = ray.GetPoint(t);
+
         Vector3 playerPos = rb != null ? rb.position : transform.position;
-        Vector2 otterScreen = cam.WorldToScreenPoint(playerPos);
-        Vector2 mouseDelta = (Vector2)Input.mousePosition - otterScreen;
-        float pxRadius = mouseDelta.magnitude;
-        if (pxRadius < 1e-4f) return;
-        Vector2 screenDir = mouseDelta / pxRadius;
-
-        // Convert screen direction to world XZ via camera axes
-        Vector3 camRight = cam.transform.right; camRight.y = 0f;
-        Vector3 camUp    = cam.transform.up;    camUp.y = 0f;
-        if (camRight.sqrMagnitude < 1e-6f) camRight = Vector3.right;
-        if (camUp.sqrMagnitude    < 1e-6f) camUp    = Vector3.forward;
-        camRight.Normalize();
-        camUp.Normalize();
-
-        dirXZ = camRight * screenDir.x + camUp * screenDir.y;
-        dirXZ.y = 0f;
-        if (dirXZ.sqrMagnitude < 1e-6f) { dirXZ = Vector3.forward; return; }
-        dirXZ.Normalize();
-
-        // Convert pixel radius to world distance using camera scale
-        float pxPerUnit;
-        if (cam.orthographic)
-        {
-            pxPerUnit = Screen.height / (2f * Mathf.Max(0.01f, cam.orthographicSize));
-        }
-        else
-        {
-            float d = Mathf.Max(0.01f, Vector3.Distance(cam.transform.position, playerPos));
-            float halfTan = Mathf.Tan(cam.fieldOfView * Mathf.Deg2Rad * 0.5f);
-            pxPerUnit = Screen.height / (2f * d * halfTan);
-        }
-
-        dist = pxRadius / Mathf.Max(1f, pxPerUnit);
+        Vector3 delta = hitWorld - playerPos;
+        delta.y = 0f;
+        dist = delta.magnitude;
+        dirXZ = dist > 1e-4f ? delta / dist : Vector3.forward;
     }
 
     // ---------------- Intent / carrot ----------------
@@ -775,14 +767,32 @@ public class CrestMovementControllerRB : MonoBehaviour
         rb.AddForce(a, ForceMode.Acceleration);
     }
 
-    // ---------------- Gizmos (kick preview points to REAR) ----------------
+    // ---------------- Gizmos ----------------
 
     private void OnDrawGizmos()
     {
         if (!drawGizmos) return;
+
+        // Rings (always visible in editor + play)
+        Vector3 center = Application.isPlaying && rb != null ? rb.position : transform.position;
+        center.y = inputPlaneY;
+
+        Gizmos.color = new Color(1f, 1f, 1f, 0.3f);
+        DrawCircleGizmo(center, innerRadius);
+        Gizmos.color = new Color(1f, 1f, 1f, 0.5f);
+        DrawCircleGizmo(center, outerRadius);
+
+        if (_arrowVisible)
+        {
+            Gizmos.color = Color.yellow;
+            Vector3 tip = center + _arrowDir * _arrowDist;
+            Gizmos.DrawLine(center, tip);
+            Gizmos.DrawSphere(tip, 0.06f);
+        }
+
         if (!Application.isPlaying) return;
 
-        // Only show when we have propulsion intent
+        // Kick preview (only when propelling)
         if (!isDragging || targetSpeed <= 1e-4f) return;
 
         float lead = Mathf.Max(0f, preKickGizmoLead);
@@ -905,5 +915,18 @@ public class CrestMovementControllerRB : MonoBehaviour
         dir.Normalize();
         float ang = Vector3.Angle(fwd, dir);
         return ang <= Mathf.Clamp(maxAngleDeg, 0f, 180f);
+    }
+
+    private void DrawCircleGizmo(Vector3 center, float radius)
+    {
+        int seg = 48;
+        for (int i = 0; i < seg; i++)
+        {
+            float a0 = 2f * Mathf.PI * i / seg;
+            float a1 = 2f * Mathf.PI * (i + 1) / seg;
+            Gizmos.DrawLine(
+                center + new Vector3(Mathf.Cos(a0) * radius, 0f, Mathf.Sin(a0) * radius),
+                center + new Vector3(Mathf.Cos(a1) * radius, 0f, Mathf.Sin(a1) * radius));
+        }
     }
 }
