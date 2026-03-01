@@ -2,6 +2,8 @@
 
 A Unity project demonstrating a procedural IK system paired with a physically based water player controller. An otter character swims in a Crest ocean using rigidbody physics, with all limb motion driven by runtime IK — no baked animations.
 
+**[Live Demo](https://dw218192.github.io/OtterIkTestProject/)**
+
 ## Systems
 
 ### Two-Bone IK Solver (`AdvancedTwoBoneIK`)
