@@ -37,8 +37,7 @@ public class CrestMovementControllerRB : MonoBehaviour
     public enum WaterState { NotInWater, Floating, Diving }
 
     [Header("References")]
-    [SerializeField] private Camera inputCamera;
-    [SerializeField] private DualRingUIControllerRB ui;
+    [SerializeField] private DualRingGuide ui;
     [SerializeField] private Rigidbody rb;
 
     [Header("Propulsion alignment gate (optional)")]
@@ -162,8 +161,8 @@ public class CrestMovementControllerRB : MonoBehaviour
 
     // ---------------- Runtime input ----------------
     private bool isDragging;
-    private Vector2 dirScreenSm;
-    private float radiusPxSm;
+    private Vector3 inputDirWorld;   // smoothed XZ direction from player to mouse hit
+    private float inputDistWorld;    // smoothed XZ distance from player to mouse hit
     private MoveZone zone = MoveZone.None;
 
     // Intent
@@ -214,13 +213,11 @@ public class CrestMovementControllerRB : MonoBehaviour
 
     private void Reset()
     {
-        inputCamera = Camera.main;
         rb = GetComponent<Rigidbody>();
     }
 
     private void Awake()
     {
-        if (inputCamera == null) inputCamera = Camera.main;
         if (rb == null) rb = GetComponent<Rigidbody>();
 
         if (rb != null)
@@ -342,9 +339,7 @@ public class CrestMovementControllerRB : MonoBehaviour
         if (Input.GetMouseButtonDown(0))
         {
             isDragging = true;
-            Vector2 rawDir = GetDirFromCenter(Input.mousePosition, out float rawR);
-            dirScreenSm = rawDir;
-            radiusPxSm = rawR;
+            ComputeMouseWorld(out inputDirWorld, out inputDistWorld);
         }
         else if (Input.GetMouseButtonUp(0))
         {
@@ -352,9 +347,8 @@ public class CrestMovementControllerRB : MonoBehaviour
             isDragging = false;
             zone = MoveZone.None;
             targetSpeed = 0f;
-            radiusPxSm = 0f;
+            inputDistWorld = 0f;
 
-            // Stop UI arrow immediately (prevents "stuck arrow")
             ui?.HideArrow();
 
             if (hadDrag) BeginReleaseAutoAlign();
@@ -362,51 +356,82 @@ public class CrestMovementControllerRB : MonoBehaviour
 
         if (!isDragging) return;
 
-        Vector2 newDir = GetDirFromCenter(Input.mousePosition, out float newR);
+        ComputeMouseWorld(out Vector3 rawDir, out float rawDist);
 
         float dt = Time.deltaTime;
         float k = inputSmoothing <= 0f ? 1f : (1f - Mathf.Exp(-inputSmoothing * dt));
-        dirScreenSm = Vector2.Lerp(dirScreenSm, newDir, k);
-        radiusPxSm = Mathf.Lerp(radiusPxSm, newR, k);
 
-        float innerPx = (ui != null) ? ui.InnerRadiusPx : 120f;
-        float outerPx = (ui != null) ? ui.OuterRadiusPx : 260f;
+        // Smooth direction via Vector3.Slerp, distance via Lerp
+        if (rawDir.sqrMagnitude > 1e-6f && inputDirWorld.sqrMagnitude > 1e-6f)
+            inputDirWorld = Vector3.Slerp(inputDirWorld, rawDir, k);
+        else
+            inputDirWorld = rawDir;
+        inputDistWorld = Mathf.Lerp(inputDistWorld, rawDist, k);
 
-        float clamped = Mathf.Clamp(radiusPxSm, 0f, outerPx);
-        if (clamped <= innerPx) zone = MoveZone.Aim;
-        else if (clamped < outerPx) zone = MoveZone.Swim;
+        float innerR = (ui != null) ? ui.InnerRadius : 1.2f;
+        float outerR = (ui != null) ? ui.OuterRadius : 2.0f;
+
+        if (inputDistWorld <= innerR) zone = MoveZone.Aim;
+        else if (inputDistWorld < outerR) zone = MoveZone.Swim;
         else zone = MoveZone.Sprint;
 
-        ui?.SetArrowInput(dirScreenSm, Mathf.Min(radiusPxSm, outerPx));
+        ui?.SetArrow(inputDirWorld, inputDistWorld);
     }
 
-    private Vector2 GetDirFromCenter(Vector3 mousePos, out float radius)
+    private void ComputeMouseWorld(out Vector3 dirXZ, out float dist)
     {
-        Vector2 center = (ui != null) ? ui.ScreenCenterPx : new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-        Vector2 delta = (Vector2)mousePos - center;
-        radius = delta.magnitude;
-        return (radius > 1e-4f) ? (delta / radius) : Vector2.up;
-    }
+        dirXZ = Vector3.forward;
+        dist = 0f;
 
-    private static Vector3 ScreenDirToWorldXZ(Vector2 screenDir, Transform cam)
-    {
-        Vector3 w = cam.right * screenDir.x + cam.up * screenDir.y;
-        w.y = 0f;
-        if (w.sqrMagnitude < 1e-6f)
+        Camera cam = Camera.main;
+        if (cam == null) return;
+
+        // Screen-space delta: otter screen position → mouse screen position.
+        // This is independent of rb.position changes (kicks/buoyancy), avoiding
+        // the feedback loop that world-space delta would create.
+        Vector3 playerPos = rb != null ? rb.position : transform.position;
+        Vector2 otterScreen = cam.WorldToScreenPoint(playerPos);
+        Vector2 mouseDelta = (Vector2)Input.mousePosition - otterScreen;
+        float pxRadius = mouseDelta.magnitude;
+        if (pxRadius < 1e-4f) return;
+        Vector2 screenDir = mouseDelta / pxRadius;
+
+        // Convert screen direction to world XZ via camera axes
+        Vector3 camRight = cam.transform.right; camRight.y = 0f;
+        Vector3 camUp    = cam.transform.up;    camUp.y = 0f;
+        if (camRight.sqrMagnitude < 1e-6f) camRight = Vector3.right;
+        if (camUp.sqrMagnitude    < 1e-6f) camUp    = Vector3.forward;
+        camRight.Normalize();
+        camUp.Normalize();
+
+        dirXZ = camRight * screenDir.x + camUp * screenDir.y;
+        dirXZ.y = 0f;
+        if (dirXZ.sqrMagnitude < 1e-6f) { dirXZ = Vector3.forward; return; }
+        dirXZ.Normalize();
+
+        // Convert pixel radius to world distance using camera scale
+        float pxPerUnit;
+        if (cam.orthographic)
         {
-            w = cam.forward;
-            w.y = 0f;
+            pxPerUnit = Screen.height / (2f * Mathf.Max(0.01f, cam.orthographicSize));
         }
-        return w.sqrMagnitude > 1e-6f ? w.normalized : Vector3.forward;
+        else
+        {
+            float d = Mathf.Max(0.01f, Vector3.Distance(cam.transform.position, playerPos));
+            float halfTan = Mathf.Tan(cam.fieldOfView * Mathf.Deg2Rad * 0.5f);
+            pxPerUnit = Screen.height / (2f * d * halfTan);
+        }
+
+        dist = pxRadius / Mathf.Max(1f, pxPerUnit);
     }
 
     // ---------------- Intent / carrot ----------------
 
     private void UpdateIntentAndCarrot()
     {
-        if (isDragging && inputCamera != null)
+        if (isDragging)
         {
-            worldDir = ScreenDirToWorldXZ(dirScreenSm, inputCamera.transform);
+            worldDir = inputDirWorld;
             worldDir.y = 0f;
             if (worldDir.sqrMagnitude > 1e-6f) worldDir.Normalize();
             else worldDir = Vector3.forward;
