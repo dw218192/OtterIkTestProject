@@ -1,9 +1,6 @@
 repo:
   features: []
   tokens:
-    unity_editor:
-      env: UNITY_EDITOR
-      path: true
     build_root: Builds
     webgl_build_dir: "{build_root}/WebGL"
 
@@ -15,3 +12,7 @@ build:
         -buildTarget WebGL
         -executeMethod WebGLBuilder.Build
         -logFile -
+
+clean:
+  paths:
+    - "{build_root}"

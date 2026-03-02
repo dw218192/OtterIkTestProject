@@ -8,7 +8,7 @@ Material:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_Name: water
-  m_Shader: {fileID: 4800000, guid: 986f7c6732e8a6e4881407d7f15f25c3, type: 3}
+  m_Shader: {fileID: 4800000, guid: 668aecf91371c8b4997e42c0c7b19527, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords:
@@ -16,6 +16,8 @@ Material:
   - _APPLYNORMALMAPPING_ON
   - _CAUSTICS_ON
   - _CLIPSURFACE_ON
+  - _COMPUTEDIRECTIONALLIGHT_ON
+  - _DEBUGVISUALISE_NONE
   - _FLOW_ON
   - _FOAM_ON
   - _PROJECTION_ORTHOGRAPHIC
@@ -23,11 +25,10 @@ Material:
   - _SUBSURFACESCATTERING_ON
   - _SUBSURFACESHALLOWCOLOUR_ON
   - _TRANSPARENCY_ON
-  - _VARYSMOOTHNESSOVERDISTANCE_ON
   m_InvalidKeywords:
-  - _COMPUTEDIRECTIONALLIGHT_ON
   - _DEBUGMULTIPLYBYLIGHT0COLOR_ON
   - _SUBSURFACEHEIGHTLERP_ON
+  - _VARYSMOOTHNESSOVERDISTANCE_ON
   m_LightmapFlags: 5
   m_EnableInstancingVariants: 1
   m_DoubleSidedGI: 0
@@ -39,7 +40,7 @@ Material:
     serializedVersion: 3
     m_TexEnvs:
     - _CausticsTexture:
-        m_Texture: {fileID: 2800000, guid: 24552fd937a31a842aa7ee1c2e14d89d, type: 3}
+        m_Texture: {fileID: 2800000, guid: 1712f23cb5185144fa2614d2da21b39e, type: 3}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - _CustomFresnelRamp:
@@ -130,12 +131,15 @@ Material:
     - _DebugVisualiseShapeSample: 0
     - _DirectionalLightBoost: 7
     - _DirectionalLightFallOff: 275
+    - _DirectionalLightFallOffFar: 42
+    - _DirectionalLightFarDistance: 137
+    - _DirectionalLightVaryRoughness: 0
     - _Fade: 0
     - _Flow: 1
     - _Foam: 1
     - _Foam3DLighting: 0
     - _FoamBubbleParallax: 0.093
-    - _FoamScale: 17.9
+    - _FoamScale: 27.4
     - _FresnelPower: 5
     - _Invert: 1
     - _LightIntensityMultiplier: 2
@@ -154,10 +158,10 @@ Material:
     - _Projection: 2
     - _ReflectionBlur: 0
     - _RefractAmt: 0
-    - _RefractionStrength: 0.867
+    - _RefractionStrength: 0.3
     - _RefractiveIndexOfAir: 1
     - _RefractiveIndexOfWater: 1.333
-    - _Roughness: 0
+    - _Roughness: 0.11
     - _S: 1
     - _Shadows: 1
     - _ShorelineFoamMinDepth: 0.01
@@ -166,10 +170,10 @@ Material:
     - _SmoothnessFar: 0.367
     - _SmoothnessFarDistance: 2000
     - _SmoothnessPower: 0.5
-    - _Specular: 0.472
+    - _Specular: 0.807
     - _StartLevel: 0.157
     - _StencilFunction: 0
-    - _SubSurfaceBase: 0.33
+    - _SubSurfaceBase: 1
     - _SubSurfaceDepthMax: 5.8
     - _SubSurfaceDepthPower: 2.09
     - _SubSurfaceHeightLerp: 1
@@ -199,7 +203,7 @@ Material:
     - _WaveFoamStart: 0
     - _WaveFoamStrength: 1
     m_Colors:
-    - _DepthFogDensity: {r: 0.3, g: 0.22, b: 0.3, a: 0}
+    - _DepthFogDensity: {r: 2, g: 2, b: 2, a: 0}
     - _Diffuse: {r: 0.30817604, g: 0.6988531, b: 1, a: 1}
     - _DiffuseGrazing: {r: 0.2916518, g: 0.3610425, b: 0.8207547, a: 1}
     - _DiffuseShadow: {r: 0.050980397, g: 0.07058824, b: 0.20000002, a: 1}
@@ -214,3 +218,4 @@ Material:
     - _SubSurfaceShallowColShadow: {r: 0.14417942, g: 0.2264151, b: 0.21173015, a: 1}
     - _SubSurfaceShallowColour: {r: 0.41999996, g: 0.75, b: 0.69, a: 1}
   m_BuildTextureStacks: []
+  m_AllowLocking: 1
