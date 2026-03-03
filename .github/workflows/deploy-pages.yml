@@ -44,6 +44,7 @@ jobs:
           unityVersion: auto
           targetPlatform: WebGL
           buildMethod: WebGLBuilder.Build
+          customParameters: -Development
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
