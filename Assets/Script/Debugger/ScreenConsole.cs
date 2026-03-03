@@ -3,8 +3,8 @@ using UnityEngine;
 
 /// <summary>
 /// On-screen debug console for WebGL builds. Captures all Debug.Log output
-/// and renders it as an IMGUI overlay. Toggle with backtick (`) key.
-/// Only active in Development Builds.
+/// and renders it as an IMGUI overlay. A small toggle button is always visible
+/// in the top-left corner; backtick (`) also toggles on desktop.
 /// </summary>
 public class ScreenConsole : MonoBehaviour
 {
@@ -22,7 +22,6 @@ public class ScreenConsole : MonoBehaviour
 
     void OnEnable()
     {
-        if (!Debug.isDebugBuild) { enabled = false; return; }
         Application.logMessageReceived += HandleLog;
     }
 
@@ -47,7 +46,12 @@ public class ScreenConsole : MonoBehaviour
 
     void OnGUI()
     {
-        if (!_visible) return;
+        if (!_visible)
+        {
+            if (GUI.Button(new Rect(10, 10, 30, 30), "~"))
+                _visible = true;
+            return;
+        }
 
         float w = Screen.width * 0.5f;
         float h = Screen.height * 0.6f;
